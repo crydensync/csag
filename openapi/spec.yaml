@@ -276,6 +276,88 @@ components:
               codes are not a factor here: they are a fallback for an
               account that already has one.
 
+    EmailStats:
+      type: object
+      description: >
+        Email-shaped activity as the engine's own audit events, all-time
+        and over a window. Read-only.
+
+        Every field counts events, and the names say requests rather than
+        deliveries because that is what they are: cryden sends nothing
+        itself and this repo's senders are log-writing stand-ins, so
+        there is no delivery record anywhere to count. A magic-link
+        request for an address with no account records no event (the
+        engine stays silent there to avoid email enumeration), so this
+        report cannot see enumeration probes; it sees what the engine
+        saw, no more.
+      properties:
+        window_days: { type: integer, description: 1-365, default 7. }
+        magic_links_requested:
+          type: integer
+          description: >
+            All-time EventMagicLinkRequested count: requests for
+            accounts that exist.
+        magic_links_requested_in_window: { type: integer }
+        email_changes_requested:
+          type: integer
+          description: >
+            All-time EventEmailChangeRequested count. The confirmation
+            message goes to the NEW address; the change only lands when
+            its token is confirmed.
+        email_changes_requested_in_window: { type: integer }
+        email_changes_confirmed:
+          type: integer
+          description: >
+            All-time EventEmailChanged count. Requested minus confirmed
+            is the pair worth reading: requests that never confirm are
+            abandoned or mistyped addresses, and the windowed pair says
+            whether that is happening now.
+        email_changes_confirmed_in_window: { type: integer }
+
+    EmailTemplates:
+      type: object
+      description: >
+        The state of the two disk templates this repo's senders read at
+        boot. Read-only: templates are files, so there is nothing here to
+        save into or reset from.
+      properties:
+        configured:
+          type: boolean
+          description: >
+            True when EMAIL_TEMPLATE_DIR was set and loaded. False means
+            the senders print their own built-in lines and there is no
+            rendered sample to report.
+        email_template_dir:
+          type: string
+          description: The configured directory, empty when unconfigured.
+        kinds:
+          type: array
+          description: One entry per template this repo knows, in a stable order.
+          items:
+            type: object
+            properties:
+              kind: { type: string, enum: [verification, magic_link] }
+              filename: { type: string, description: verification.txt or magic_link.txt }
+              configured:
+                type: boolean
+                description: >
+                  False when EMAIL_TEMPLATE_DIR was not set or the
+                  directory held no template for this kind; the two fall
+                  back independently, so one can be configured without
+                  the other.
+              sample:
+                type: string
+                description: >
+                  A rendering with placeholder values (To
+                  status@example.com, Token SAMPLE_TOKEN, URL the
+                  magic-link example). Empty when not configured.
+              sample_error:
+                type: string
+                description: >
+                  Set only when a configured template fails to render;
+                  surfaced rather than hidden, because a template that
+                  cannot render is one that will fail at send time.
+
     AdminUser:
       type: object
       description: >
@@ -2263,8 +2345,6 @@ paths:
                         description: The four valid values, least severe first.
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: >
             not_configured — the router was built without a shipped-events
@@ -2272,6 +2352,87 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/email/stats:
+    get:
+      summary: Email-shaped activity as the engine's own audit events
+      description: >
+        Admin only. Counts the audit events each email-shaped flow
+        records: magic-link requests, email changes requested, and email
+        confirmed, all-time and over a window. Read-only by
+        construction; it calls count methods and records nothing.
+
+        It counts REQUESTS, not deliveries. cryden sends nothing itself
+        and this repo's senders are console stand-ins that log, so a log
+        line is not a delivery record, and no field here claims one.
+        magic_links_requested is the closest thing to "magic links sent"
+        this deployment has, and it includes only requests for addresses
+        that hold an account. The engine returns nil for an unknown
+        address to avoid email enumeration and records no event, so a
+        request for an address nobody holds is invisible here by design.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: window_days
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 365, default: 7 }
+          description: >
+            The reporting window. Out of range or non-numeric is a 400,
+            not a silent clamp.
+      responses:
+        '200':
+          description: The report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/EmailStats' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: not_configured, the router was built without the audit store.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/settings/email-templates:
+    get:
+      summary: Which message templates this deployment has configured
+      description: >
+        Admin only. Reports the state of the two disk templates this repo's
+        senders read at boot (verification.txt and magic_link.txt, from
+        EMAIL_TEMPLATE_DIR): configured or built-in, the directory they
+        live in, and a rendered sample of each with placeholder values.
+        A sample_error on a configured kind means the template was found
+        but does not render (a parse error or an unknown field), which is
+        surfaced rather than hidden, because a template that cannot
+        render is one that will fail at send time.
+
+        READ-ONLY BY CONSTRUCTION: templates are files on disk, so there
+        is no save and no reset here; an operator edits them on the host
+        filesystem and restarts, exactly as they would any other
+        file-based configuration. The sample is rendered per request, so
+        it reflects the files as loaded at boot, not as they sit on disk
+        now (a change requires a restart; there is no reload path).
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: >
+            The status of both templates. configured:false (and empty
+            sample fields) is the state of a deployment with no
+            EMAIL_TEMPLATE_DIR, which is unconfigured rather than failing.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/EmailTemplates' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
 
   /admin/config-tuning:
     get:

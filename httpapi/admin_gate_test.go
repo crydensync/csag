@@ -31,6 +31,8 @@ var adminPaths = []string{
 	"/v1/admin/settings/llm-provider",
 	"/v1/admin/settings/database-provider",
 	"/v1/admin/settings/ask-ai-widget",
+	"/v1/admin/email/stats",
+	"/v1/admin/settings/email-templates",
 }
 
 // TestTier6AdminSurfaceIs501OnSQLite is the decision NEXT.md Tier 6 asked

@@ -615,6 +615,12 @@ func serve() {
 
 		Digests: digestStore,
 
+		// The loaded email templates, nil when EMAIL_TEMPLATE_DIR was not
+		// set (the senders then print their built-in lines). The template
+		// status endpoint reports configured:false in that case rather
+		// than failing; see httpapi.Deps.Templates.
+		Templates: emailTemplates,
+
 		Settings: settingsSecrets,
 
 		Reviews: reviews,

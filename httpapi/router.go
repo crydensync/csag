@@ -13,6 +13,7 @@ import (
 	"github.com/crydensync/api/digest"
 	"github.com/crydensync/api/settings"
 	"github.com/crydensync/api/shiplog"
+	"github.com/crydensync/api/templates"
 	"github.com/crydensync/api/usermeta"
 	"github.com/crydensync/api/webhook"
 )
@@ -108,6 +109,15 @@ type Deps struct {
 	// main.go built one; the handler then answers 404 rather than
 	// panicking.
 	AskAI *askai.Service
+
+	// Templates backs GET /v1/admin/settings/email-templates. Nil unless
+	// Templates backs GET /v1/admin/settings/email-templates. Nil unless
+	// EMAIL_TEMPLATE_DIR pointed at a loadable directory. With no
+	// templates configured the senders print their own built-in lines,
+	// and there is no rendered sample to report. The endpoint answers
+	// configured:false rather than an error: unconfigured is the state a
+	// deployment without the env var is legitimately in, not a fault.
+	Templates *templates.Set
 }
 
 // NewRouter builds the full route table. Called once from main.go.
@@ -117,7 +127,8 @@ func NewRouter(d Deps) http.Handler {
 	auth := &AuthHandlers{Engine: engine}
 	sessions := &SessionHandlers{Engine: engine}
 	account := &AccountHandlers{Engine: engine}
-	email := &EmailHandlers{Engine: engine}
+	email := &EmailHandlers{Engine: engine, Audit: d.Audit}
+	emailTemplates := &EmailTemplatesHandlers{TemplateDir: d.Config.EmailTemplateDir, Templates: d.Templates}
 	health := &HealthHandler{DB: d.DB}
 	oauth := &OAuthHandlers{Engine: engine, Config: d.Config}
 	oauthHealth := NewOAuthHealthHandlers(oauth)
@@ -425,6 +436,23 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("GET /v1/admin/settings/ask-ai-widget", adminOnly(aiSettings.AskAIWidget))
 	mux.HandleFunc("PUT /v1/admin/settings/ask-ai-widget", adminOnly(aiSettings.PutAskAIWidget))
 	mux.HandleFunc("DELETE /v1/admin/settings/ask-ai-widget", adminOnly(aiSettings.DeleteAskAIWidget))
+
+	// Email. The stats report counts the engine's own email-shaped audit
+	// events (magic-link requests, email changes requested and confirmed),
+	// all-time and over a window, the same audit-event reading the
+	// security reports make. There is no delivery health here on purpose:
+	// the senders are this repo's console stand-ins writing to a log, and
+	// a log line is not a delivery record, so the report counts requests
+	// and its field names say so.
+	//
+	// The template status is read-only in the same way its subject is:
+	// templates are files on disk loaded at boot, so the endpoint reports
+	// which are configured and renders a sample of each, and offers no
+	// save or reset, because there is nothing on this side to save into.
+	// The settings block is where the console's Email screen looks for
+	// it, beside the LLM and database settings it already reads.
+	mux.HandleFunc("GET /v1/admin/email/stats", adminOnly(email.Stats))
+	mux.HandleFunc("GET /v1/admin/settings/email-templates", adminOnly(emailTemplates.EmailTemplates))
 
 	return mux
 }
