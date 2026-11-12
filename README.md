@@ -110,6 +110,19 @@ The connection is opened with three pragmas, all of them load-bearing: `foreign_
 
 A clean stop is what closes that window: on `SIGTERM` or `SIGINT` the server stops accepting connections, waits up to 30 seconds for the requests already in flight, stops the webhook worker and digest scheduler, and closes the database — which on SQLite is the checkpoint that folds the `-wal` file back into `api.db` and removes the sidecar files. So `systemctl stop`, `docker stop` and Ctrl-C all leave a `api.db` that is complete on its own. A `kill -9`, a crash or a power loss does not, which is why the paragraph above still stands.
 
+### Password policy settings
+
+`GET /v1/admin/settings/password-policy` reads the active policy and `PUT` replaces it. The write
+is persisted in the API settings table, applies immediately across instances, and is recorded as
+`password_policy_changed`. Signup, account password changes and admin-created accounts all check
+the live policy and return every stable CSAX Auth violation code.
+
+The policy may strengthen the engine defaults but cannot weaken them: minimum length is 8–72 bytes,
+maximum length is at least the minimum and at most 72 bytes. Composition checks are independently
+configurable. `PASSWORD_POLICY_*` environment variables provide the initial policy until an admin
+saves a runtime override. SQLite deployments keep env-configured policy, but the admin endpoints
+remain unavailable there with the rest of the admin surface.
+
 ## Migrations
 
 There is no migrate step in the setup instructions because there does not need to be one. Migrations are compiled into the binary and applied on boot, so a `git pull` or a new container image brings its own schema change with it.

@@ -4,10 +4,13 @@ import (
 	"net/http"
 
 	"github.com/crydensync/cryden/v2"
+
+	"github.com/crydensync/api/passwordpolicy"
 )
 
 type AccountHandlers struct {
-	Engine *cryden.Engine
+	Engine         *cryden.Engine
+	PasswordPolicy *passwordpolicy.Manager
 }
 
 // ChangePassword — auth required. Revokes ALL sessions on success,
@@ -21,6 +24,10 @@ func (h *AccountHandlers) ChangePassword(w http.ResponseWriter, r *http.Request)
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeBadRequest(w, "invalid request body")
+		return
+	}
+
+	if !enforcePasswordPolicy(w, r, h.PasswordPolicy, req.NewPassword) {
 		return
 	}
 

@@ -276,6 +276,23 @@ components:
               codes are not a factor here: they are a fallback for an
               account that already has one.
 
+    PasswordPolicy:
+      type: object
+      required:
+        - min_length
+        - max_length
+        - require_uppercase
+        - require_lowercase
+        - require_digit
+        - require_symbol
+      properties:
+        min_length: { type: integer, minimum: 8, maximum: 72 }
+        max_length: { type: integer, minimum: 8, maximum: 72 }
+        require_uppercase: { type: boolean }
+        require_lowercase: { type: boolean }
+        require_digit: { type: boolean }
+        require_symbol: { type: boolean }
+
     EmailStats:
       type: object
       description: >
@@ -2670,6 +2687,58 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/settings/password-policy:
+    get:
+      summary: The active password policy
+      description: >
+        Admin only. Returns the policy the API currently enforces for signup,
+        password changes and admin-created accounts. Runtime updates are
+        persisted and read by every API instance. The policy cannot weaken the
+        CSAX Auth baseline: minimum length is 8-72 bytes and maximum length is
+        between the minimum and 72 bytes. Composition requirements can be
+        enabled independently. SQLite deployments do not expose admin routes.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: The active policy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/PasswordPolicy' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+    put:
+      summary: Replace the active password policy
+      description: >
+        Admin only. All fields are required. Saves immediately and persists
+        across restarts and API instances. The change is recorded as an audit
+        event. Minimum length must be 8-72; maximum length must be at least
+        the minimum and no greater than 72, because the engine's immutable
+        baseline cannot be weakened. Password writes rejected by the active
+        policy include every stable violation code in error.details.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PasswordPolicy' }
+      responses:
+        '200':
+          description: The saved policy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/PasswordPolicy' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
 
   /admin/settings/llm-provider:
     get:

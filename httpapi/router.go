@@ -11,6 +11,7 @@ import (
 	"github.com/crydensync/api/askai"
 	"github.com/crydensync/api/config"
 	"github.com/crydensync/api/digest"
+	"github.com/crydensync/api/passwordpolicy"
 	"github.com/crydensync/api/settings"
 	"github.com/crydensync/api/shiplog"
 	"github.com/crydensync/api/templates"
@@ -96,6 +97,9 @@ type Deps struct {
 	// the clear. See settings.Secrets.
 	Settings *settings.Secrets
 
+	// PasswordPolicy is the persistent, non-secret policy active on this API.
+	PasswordPolicy *passwordpolicy.Manager
+
 	// Reviews backs the flagged-event review queue. This repo's own table
 	// (migrations/014) and package — cryden records that a login tripped
 	// anomaly signals and has no concept of a person having read one, so
@@ -124,9 +128,9 @@ type Deps struct {
 func NewRouter(d Deps) http.Handler {
 	engine := d.Engine
 
-	auth := &AuthHandlers{Engine: engine}
+	auth := &AuthHandlers{Engine: engine, PasswordPolicy: d.PasswordPolicy}
 	sessions := &SessionHandlers{Engine: engine}
-	account := &AccountHandlers{Engine: engine}
+	account := &AccountHandlers{Engine: engine, PasswordPolicy: d.PasswordPolicy}
 	email := &EmailHandlers{Engine: engine, Audit: d.Audit}
 	emailTemplates := &EmailTemplatesHandlers{TemplateDir: d.Config.EmailTemplateDir, Templates: d.Templates}
 	health := &HealthHandler{DB: d.DB}
@@ -140,7 +144,8 @@ func NewRouter(d Deps) http.Handler {
 	security := &SecurityHandlers{Audit: d.Audit, Users: d.Users, Config: d.Config}
 	metadata := &MetadataHandlers{Users: d.Users, Meta: d.Meta}
 	users := &UserHandlers{Engine: engine, Users: d.Users, Sessions: d.Sessions, Audit: d.Audit}
-	userActions := &UserActionHandlers{Engine: engine, Users: d.Users, Sessions: d.Sessions, Audit: d.Audit, OAuth: d.OAuth, TOTP: d.TOTP}
+	userActions := &UserActionHandlers{Engine: engine, Users: d.Users, Sessions: d.Sessions, Audit: d.Audit, OAuth: d.OAuth, TOTP: d.TOTP, PasswordPolicy: d.PasswordPolicy}
+	passwordPolicy := &PasswordPolicyHandlers{Policy: d.PasswordPolicy, Audit: d.Audit}
 	hooks := &WebhookHandlers{Store: d.Hooks}
 	logging := &LoggingHandlers{Store: d.Shipped}
 	digests := &DigestHandlers{Engine: engine, Store: d.Digests}
@@ -436,6 +441,8 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("GET /v1/admin/settings/ask-ai-widget", adminOnly(aiSettings.AskAIWidget))
 	mux.HandleFunc("PUT /v1/admin/settings/ask-ai-widget", adminOnly(aiSettings.PutAskAIWidget))
 	mux.HandleFunc("DELETE /v1/admin/settings/ask-ai-widget", adminOnly(aiSettings.DeleteAskAIWidget))
+	mux.HandleFunc("GET /v1/admin/settings/password-policy", adminOnly(passwordPolicy.Get))
+	mux.HandleFunc("PUT /v1/admin/settings/password-policy", adminOnly(passwordPolicy.Put))
 
 	// Email. The stats report counts the engine's own email-shaped audit
 	// events (magic-link requests, email changes requested and confirmed),

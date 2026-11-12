@@ -40,6 +40,7 @@ import (
 	"github.com/crydensync/api/digest"
 	"github.com/crydensync/api/httpapi"
 	"github.com/crydensync/api/operator"
+	"github.com/crydensync/api/passwordpolicy"
 	"github.com/crydensync/api/settings"
 	"github.com/crydensync/api/shiplog"
 	"github.com/crydensync/api/templates"
@@ -312,14 +313,20 @@ func serve() {
 	// the key being *malformed* is fatal, and that is a configuration
 	// mistake worth refusing to boot on.
 	var settingsSecrets *settings.Secrets
+	var settingsStore settings.Store
 	if !cfg.UsesSQLite() {
-		settingsSecrets, err = settings.NewSecrets(settings.NewStore(db), cfg.SettingsEncryptionKey)
+		settingsStore = settings.NewStore(db)
+		settingsSecrets, err = settings.NewSecrets(settingsStore, cfg.SettingsEncryptionKey)
 		if err != nil {
 			log.Fatalf("invalid SETTINGS_ENCRYPTION_KEY: %v", err)
 		}
 		if settingsSecrets.Configured() {
 			log.Printf("AI settings endpoints enabled (llm-provider, database-provider)")
 		}
+	}
+	activePasswordPolicy, err := passwordpolicy.NewManager(context.Background(), settingsStore, cfg.PasswordPolicy)
+	if err != nil {
+		log.Fatalf("password policy: %v", err)
 	}
 
 	engineCfg := cryden.Config{
@@ -621,7 +628,8 @@ func serve() {
 		// than failing; see httpapi.Deps.Templates.
 		Templates: emailTemplates,
 
-		Settings: settingsSecrets,
+		Settings:       settingsSecrets,
+		PasswordPolicy: activePasswordPolicy,
 
 		Reviews: reviews,
 

@@ -2,11 +2,10 @@
 // through a settings screen, as opposed to the environment variables
 // everything else in this repo is configured by at startup.
 //
-// What lives here is exactly the configuration cryden cannot own, because
-// cryden has no settings concept at all: ai.LLMProvider and
-// ai.QueryableStore are Go interfaces a host implements in code, so the
-// credential behind each one is the host's to store. The table is
-// migrations/013_settings.up.sql.
+// What lives here is runtime configuration this API changes: AI provider
+// credentials and the active password policy. The policy is not a credential;
+// it is stored as JSON and read on password writes so changes are shared across
+// API instances. The table is migrations/013_settings.up.sql.
 //
 // The one rule this package exists to make unavoidable: **a credential
 // never reaches the store as plaintext.** The store below deals in opaque
@@ -39,6 +38,8 @@ const (
 	// limits a console renders, so it is the one key here that is not
 	// secret.
 	KeyAskAIWidget = "ask_ai_widget"
+	// KeyPasswordPolicy stores the non-secret active password policy.
+	KeyPasswordPolicy = "password_policy"
 )
 
 // ErrNotFound means nothing is stored under that key yet. Reported
