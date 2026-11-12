@@ -2911,6 +2911,42 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
 
+  /admin/ai/query:
+    post:
+      summary: Run an admin-only read-only AI query
+      description: Admin only. The model produces a typed query intent, not SQL. CSAG validates its entity, fields, operators and limit against cryden's allowlist, then runs it using the configured read-only database connection.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [question]
+              properties:
+                question: { type: string, minLength: 1, maxLength: 500 }
+      responses:
+        '200':
+          description: Query result with source entity citation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [entity, columns, rows, row_count]
+                    properties:
+                      entity: { type: string, enum: [users, sessions, audit_events] }
+                      columns: { type: array, items: { type: string } }
+                      rows: { type: array, items: { type: array, items: { type: string } } }
+                      row_count: { type: integer, minimum: 0, maximum: 500 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: LLM or read-only database provider is not configured }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
   /admin/settings/logging:
     get:
       summary: Read runtime shipped-log settings

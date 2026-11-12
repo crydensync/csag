@@ -162,6 +162,7 @@ func NewRouter(d Deps) http.Handler {
 	jwtClaims := &JWTClaimHandlers{Provider: d.JWTClaims}
 	anomalies := &AnomalyHandlers{Audit: d.Audit, Reviews: d.Reviews}
 	askAI := &WidgetHandlers{Service: d.AskAI}
+	adminAI := &AdminAIHandlers{Service: d.AskAI}
 	docs := NewDocsHandler()
 
 	// The gate for every route under /v1/admin, resolved once. On a
@@ -400,6 +401,7 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("GET /v1/admin/logging/recent", adminOnly(logging.Recent))
 	mux.HandleFunc("GET /v1/admin/settings/logging", adminOnly(loggingSettings.Read))
 	mux.HandleFunc("PUT /v1/admin/settings/logging", adminOnly(loggingSettings.Save))
+	mux.HandleFunc("POST /v1/admin/ai/query", adminOnly(adminAI.Query))
 
 	// The weekly digest, and the history of the ones the schedule built.
 	//

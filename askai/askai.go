@@ -84,8 +84,9 @@ type Service struct {
 
 	// mu guards current. Held across a rebuild, which is cheap by
 	// design — see build.
-	mu      sync.Mutex
-	current *built
+	mu           sync.Mutex
+	current      *built
+	adminCurrent *built
 }
 
 // Providers builds the pair cryden's widget.Config needs from a stored
@@ -244,6 +245,79 @@ func (s *Service) Ask(ctx context.Context, req Request) (widget.Answer, error) {
 	}, req.OwnerUserID, req.Question)
 }
 
+// AdminQuery runs an operator question through cryden's allowlisted,
+// read-only query-intent pipeline. The caller must be authenticated as admin.
+func (s *Service) AdminQuery(ctx context.Context, question string) (AdminQueryResult, error) {
+	if strings.TrimSpace(question) == "" || len(question) > maxQuestionLength {
+		return AdminQueryResult{}, fmt.Errorf("%w: question must contain 1-%d characters", ErrInvalidQuestion, maxQuestionLength)
+	}
+	llmRaw, err := s.secrets.Get(ctx, settings.KeyLLMProvider)
+	if errors.Is(err, settings.ErrNotFound) {
+		return AdminQueryResult{}, ErrNotConfigured
+	}
+	if err != nil {
+		return AdminQueryResult{}, err
+	}
+	dbRaw, err := s.secrets.Get(ctx, settings.KeyDatabaseProvider)
+	if errors.Is(err, settings.ErrNotFound) {
+		return AdminQueryResult{}, ErrNotConfigured
+	}
+	if err != nil {
+		return AdminQueryResult{}, err
+	}
+	ready, err := s.buildAdmin(llmRaw, dbRaw)
+	if err != nil {
+		return AdminQueryResult{}, err
+	}
+	intent, err := ready.provider.ParseQueryIntent(ctx, question)
+	if err != nil {
+		return AdminQueryResult{}, err
+	}
+	result, err := crydenai.ExecuteIntent(ctx, ready.store, intent)
+	if err != nil {
+		return AdminQueryResult{}, err
+	}
+	return AdminQueryResult{Entity: intent.Entity, Columns: result.Columns, Rows: result.Rows, RowCount: len(result.Rows)}, nil
+}
+
+type AdminQueryResult struct {
+	Entity   string     `json:"entity"`
+	Columns  []string   `json:"columns"`
+	Rows     [][]string `json:"rows"`
+	RowCount int        `json:"row_count"`
+}
+
+func (s *Service) buildAdmin(llmRaw, dbRaw []byte) (*built, error) {
+	fingerprint := fingerprint(llmRaw, dbRaw, []string{"admin"})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.adminCurrent != nil && s.adminCurrent.fingerprint == fingerprint {
+		return s.adminCurrent, nil
+	}
+	llmConfig, err := settings.UnmarshalLLMProvider(llmRaw)
+	if err != nil {
+		return nil, err
+	}
+	dbConfig, err := settings.UnmarshalDatabaseProvider(dbRaw)
+	if err != nil {
+		return nil, err
+	}
+	build := s.providers
+	if build == nil {
+		build = defaultProviders
+	}
+	provider, store, closer, err := build(llmConfig, dbConfig)
+	if err != nil {
+		return nil, err
+	}
+	next := &built{fingerprint: fingerprint, provider: provider, store: store, closer: closer}
+	if s.adminCurrent != nil && s.adminCurrent.closer != nil {
+		_ = s.adminCurrent.closer.Close()
+	}
+	s.adminCurrent = next
+	return next, nil
+}
+
 // Close releases the connection pool behind the cached providers. The
 // cached pair is replaced and closed on every rebuild, so this is only
 // about the last one — main.go calls it during shutdown, after the server
@@ -252,14 +326,17 @@ func (s *Service) Ask(ctx context.Context, req Request) (widget.Answer, error) {
 func (s *Service) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.current == nil {
-		return nil
-	}
 	var err error
-	if s.current.closer != nil {
+	if s.current != nil && s.current.closer != nil {
 		err = s.current.closer.Close()
 	}
 	s.current = nil
+	if s.adminCurrent != nil && s.adminCurrent.closer != nil {
+		if closeErr := s.adminCurrent.closer.Close(); err == nil {
+			err = closeErr
+		}
+	}
+	s.adminCurrent = nil
 	return err
 }
 
