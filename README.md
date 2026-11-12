@@ -469,25 +469,25 @@ Retries use exponential backoff (30s doubling, capped at 30m) up to `WEBHOOK_MAX
 
 ## Cloud logging and shipped events
 
-`CLOUD_LOGGING` composes a second, redacted, filtered copy of the engine's log records alongside the full-detail JSON line on stdout, in exactly the shape cryden's `logger` package doc prescribes:
+Postgres deployments compose a second, redacted copy of the engine's log records alongside the full-detail JSON line on stdout:
 
 ```go
 logger.NewMultiLogger(
     logger.NewConsoleJSONLogger(),                 // full detail, stays on stdout
-    logger.NewLevelFilter(                         // and the copy that leaves
-        logger.NewMaskingRedactor(shipSink),       // without the personal data
-        cfg.LogLevel,
-    ),
+    &shiplog.RuntimeLogger{                        // applies current enable + level settings
+        Runtime: runtime,
+        Sink: logger.NewMaskingRedactor(shipSink), // after removing personal data
+    },
 )
 ```
 
 Redacting *inside* the fan-out rather than around it is the point: stdout keeps the IP address that makes an incident debuggable, and only the shipped copy loses it. `CLOUD_LOG_REDACTION` picks how — `mask` replaces the value with `[redacted]`, `hash` replaces it with a keyed HMAC digest so the same address still reads as the same address across records ("one IP, forty accounts" is the shape credential stuffing has, and a mask destroys it). `hash` requires `CLOUD_LOG_HASH_KEY`, which should be a value of its own rather than a reuse of `JWT_SECRET` — this key is handed to the component whose job is to hand its output to a third party.
 
-There is no vendor here: this repo ships no SDK, so "shipped" means "recorded in `shipped_log_events`", which `GET /v1/admin/logging/recent?limit=&level=` reads back. It is the same bytes a hosted aggregator would have received, which is what makes it a stand-in for one rather than a second, different log beside it — swapping in a real client later is a change to one line of `main.go`.
+There is no vendor integration here: this repo ships no SDK, so "shipped" means "recorded in `shipped_log_events`", which `GET /v1/admin/logging/recent?limit=&level=` reads back. `GET|PUT /v1/admin/settings/logging` enables or pauses this local archive and changes its minimum severity immediately. `CLOUD_LOGGING` and `LOG_LEVEL` supply the initial defaults until an operator saves runtime settings. `CLOUD_LOG_REDACTION` and `CLOUD_LOG_HASH_KEY` remain deployment configuration; their secret value is never exposed by the API.
 
 - `level=warn` means **warn and above**, the same direction the `LevelFilter` above the sink reads the word. One word, one meaning, within one feature.
 - An unknown `level` is a `400` naming the four valid values, not an empty list — which is indistinguishable from "the engine has been quiet".
-- The write is **synchronous**, on the goroutine that logged. That is a real cost and is not the shape a busy deployment wants; it is the shape this one can have, because an asynchronous sink needs a flush policy and a shutdown path, and this repo has no graceful shutdown anywhere yet. A buffer that is never flushed on exit is a log that silently drops its last records before a crash, which for a log is the failure that matters most. `LOG_LEVEL` (default `info`) is what keeps the volume sane in the meantime, since the engine's debug records never reach the sink.
+- The write is **synchronous**, on the goroutine that logged. That is a real cost and is not the shape a busy deployment wants; it is the shape this one can have, because an asynchronous sink needs a flush policy and a shutdown path. The minimum severity keeps the volume bounded; records below it never reach the archive.
 
 ## Config tuning advisor
 

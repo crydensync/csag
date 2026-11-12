@@ -2911,6 +2911,51 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
 
+  /admin/settings/logging:
+    get:
+      summary: Read runtime shipped-log settings
+      description: Admin only. Returns archive enablement, minimum level, deployment redaction mode, and whether a hash key is configured. Secrets are never returned.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Current runtime and deployment logging settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [enabled, min_level, redaction, hash_key_set]
+                    properties:
+                      enabled: { type: boolean }
+                      min_level: { type: string, enum: [debug, info, warn, error] }
+                      redaction: { type: string, enum: [mask, hash] }
+                      hash_key_set: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+    put:
+      summary: Update runtime shipped-log settings
+      description: Admin only. Enables or pauses the redacted local archive and sets its minimum severity. Changes take effect immediately. Redaction mode and keys remain deployment configuration.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled, min_level]
+              properties:
+                enabled: { type: boolean }
+                min_level: { type: string, enum: [debug, info, warn, error] }
+      responses:
+        '200': { description: Saved active settings and redacted deployment details }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
   /admin/settings/jwt-claims:
     get:
       summary: Read global JWT source mappings

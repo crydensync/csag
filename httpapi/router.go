@@ -74,12 +74,13 @@ type Deps struct {
 	Hooks       webhook.Store
 	WebhookWake chan<- struct{}
 
-	// Shipped backs the admin shipped-events log — the redacted copy of
-	// the engine's log records that the cloud sink was handed. Nil unless
-	// CLOUD_LOGGING is set, for the same reason Hooks is: with the sink
-	// off, nothing writes rows, and an empty list would be a lie about a
-	// deployment that ships nothing.
+	// Shipped backs the admin shipped-events log. Present on Postgres even
+	// when runtime shipping is disabled, so operators can inspect old rows
+	// and configure the sink in the same console.
 	Shipped shiplog.Store
+	// LogRuntime controls the local redacted archive; updates take effect
+	// immediately in the engine's logger.
+	LogRuntime *shiplog.Runtime
 
 	// Digests backs GET /v1/admin/digest/history. Nil unless
 	// DIGEST_INTERVAL_HOURS asked for a schedule: the table is only ever
@@ -153,6 +154,7 @@ func NewRouter(d Deps) http.Handler {
 	auditLog := &AdminAuditHandlers{DB: d.DB}
 	hooks := &WebhookHandlers{Store: d.Hooks, Secrets: d.Settings, Wake: d.WebhookWake}
 	logging := &LoggingHandlers{Store: d.Shipped}
+	loggingSettings := &LoggingSettingsHandlers{Runtime: d.LogRuntime, Redaction: d.Config.CloudLogRedaction, HashKeySet: d.Config.CloudLogHashKey != ""}
 	digests := &DigestHandlers{Engine: engine, Store: d.Digests}
 	support := &SupportHandlers{Engine: engine}
 	tuning := &TuningHandlers{Audit: d.Audit, Config: d.Config}
@@ -396,6 +398,8 @@ func NewRouter(d Deps) http.Handler {
 	// to see it: cryden keeps no history of what it logged, so this table
 	// is the history.
 	mux.HandleFunc("GET /v1/admin/logging/recent", adminOnly(logging.Recent))
+	mux.HandleFunc("GET /v1/admin/settings/logging", adminOnly(loggingSettings.Read))
+	mux.HandleFunc("PUT /v1/admin/settings/logging", adminOnly(loggingSettings.Save))
 
 	// The weekly digest, and the history of the ones the schedule built.
 	//

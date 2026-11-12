@@ -330,6 +330,19 @@ func serve() {
 		log.Fatalf("password policy: %v", err)
 	}
 
+	var shippedLog shiplog.Store
+	var loggingRuntime *shiplog.Runtime
+	if !cfg.UsesSQLite() {
+		shippedLog = shiplog.NewStore(db)
+		loggingRuntime, err = shiplog.NewRuntime(context.Background(), settingsStore, shiplog.RuntimeSettings{
+			Enabled:  cfg.CloudLogging,
+			MinLevel: cfg.LogLevel.String(),
+		})
+		if err != nil {
+			log.Fatalf("cloud logging settings: %v", err)
+		}
+	}
+
 	globalClaims := jwtClaimsProvider(operators, metadata, users, settingsStore)
 	var claimsProvider token.ClaimsProvider
 	if globalClaims != nil {
@@ -507,9 +520,9 @@ func serve() {
 		engineCfg.WebhookEvents = cfg.WebhookEvents
 	}
 
-	// Cloud logging. Off by default, and off means Config.Logger stays nil
-	// and the engine keeps its own console default — there is nothing to
-	// configure for a deployment that ships no logs anywhere.
+	// The local shipped log archive can be switched and level-filtered at
+	// runtime. The actual redaction mode remains deployment configuration,
+	// so its hashing key never enters the admin settings surface.
 	//
 	// The composition is the one cryden's own logger package doc
 	// prescribes, and the nesting is the whole point: the console logger
@@ -517,11 +530,9 @@ func serve() {
 	// through the level filter and the redactor first, so only it loses
 	// the IP address that makes an incident debuggable. Wrapping the
 	// fan-out in the redactor instead would strip both copies.
-	var shippedLog shiplog.Store
-	if cfg.CloudLogging && !cfg.UsesSQLite() {
-		shipped := shiplog.NewLogger(shiplog.NewStore(db))
+	if !cfg.UsesSQLite() {
+		shipped := shiplog.NewLogger(shippedLog)
 		shipped.Errors = log.Default()
-		shippedLog = shipped.Store
 
 		var redacted logger.Logger
 		if cfg.CloudLogRedaction == config.CloudLogRedactionHash {
@@ -541,10 +552,10 @@ func serve() {
 
 		engineCfg.Logger = logger.NewMultiLogger(
 			logger.NewConsoleJSONLogger(),
-			logger.NewLevelFilter(redacted, cfg.LogLevel),
+			&shiplog.RuntimeLogger{Runtime: loggingRuntime, Sink: redacted},
 		)
-		log.Printf("cloud logging enabled: records at %s and above are redacted (%s) and recorded in shipped_log_events",
-			cfg.LogLevel, cfg.CloudLogRedaction)
+		log.Printf("cloud logging settings loaded: enabled=%t minimum=%s redaction=%s",
+			loggingRuntime.Snapshot().Enabled, loggingRuntime.Snapshot().MinLevel, cfg.CloudLogRedaction)
 	}
 
 	engine, err := cryden.New(engineCfg)
@@ -648,7 +659,8 @@ func serve() {
 		OAuth: st.oauth,
 		TOTP:  st.totp,
 
-		Shipped: shippedLog,
+		Shipped:    shippedLog,
+		LogRuntime: loggingRuntime,
 
 		Digests: digestStore,
 
