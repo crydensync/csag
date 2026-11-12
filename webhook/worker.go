@@ -75,6 +75,10 @@ type Worker struct {
 	// configuration; the worker says so once at startup.
 	Secret string
 
+	// Endpoint resolves the current runtime-managed target for each attempt.
+	// When nil, URL and Secret above retain the environment-configured behavior.
+	Endpoint func() (url, secret string)
+
 	// MaxAttempts is the total number of attempts a delivery gets,
 	// including the first. Zero means DefaultMaxAttempts.
 	MaxAttempts int
@@ -151,7 +155,7 @@ func Verify(secret string, body []byte, header string) bool {
 // next boot, which is why stopping promptly is safe here.
 func (w *Worker) Run(ctx context.Context) {
 	w.applyDefaults()
-	if w.Secret == "" {
+	if w.Secret == "" && w.Endpoint == nil {
 		w.logf("webhook worker: WEBHOOK_SECRET is not set — deliveries are unsigned")
 	}
 
@@ -279,8 +283,15 @@ func (w *Worker) resolve(ctx context.Context, d Delivery, result Result) {
 // propagated, and every path here ends in a Result.
 func (w *Worker) post(ctx context.Context, d Delivery) Result {
 	start := w.Now()
+	url, secret := w.URL, w.Secret
+	if w.Endpoint != nil {
+		url, secret = w.Endpoint()
+	}
+	if strings.TrimSpace(url) == "" {
+		return Result{Duration: w.Now().Sub(start), Err: "webhook endpoint is not configured"}
+	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, w.URL, bytes.NewReader(d.Payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(d.Payload))
 	if err != nil {
 		// A malformed WEBHOOK_URL. Retried rather than terminal, because
 		// the row would otherwise be lost to a typo an operator is about
@@ -299,8 +310,8 @@ func (w *Worker) post(ctx context.Context, d Delivery) Result {
 	}
 	req.Header.Set("X-Cryden-Delivery-Attempt", strconv.Itoa(d.Attempts))
 
-	if w.Secret != "" {
-		req.Header.Set(SignatureHeader, Sign(w.Secret, d.Payload))
+	if secret != "" {
+		req.Header.Set(SignatureHeader, Sign(secret, d.Payload))
 	}
 
 	resp, err := w.Client.Do(req)

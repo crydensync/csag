@@ -39,6 +39,7 @@ import (
 	"github.com/crydensync/api/config"
 	"github.com/crydensync/api/digest"
 	"github.com/crydensync/api/httpapi"
+	"github.com/crydensync/api/jwtclaims"
 	"github.com/crydensync/api/operator"
 	"github.com/crydensync/api/passwordpolicy"
 	"github.com/crydensync/api/settings"
@@ -267,7 +268,7 @@ func serve() {
 	// the router's handlers guard on exactly that check.
 	var webhookStore webhook.Store
 	var webhookWake chan struct{}
-	if cfg.WebhookURL != "" && !cfg.UsesSQLite() {
+	if (cfg.WebhookURL != "" || cfg.SettingsEncryptionKey != "") && !cfg.UsesSQLite() {
 		webhookStore = webhook.NewStore(db)
 		// Capacity 1, used purely as a nudge: the sender's job is to make
 		// the row and return, so a full channel must drop the hint rather
@@ -329,6 +330,11 @@ func serve() {
 		log.Fatalf("password policy: %v", err)
 	}
 
+	globalClaims := jwtClaimsProvider(operators, metadata, users, settingsStore)
+	var claimsProvider token.ClaimsProvider
+	if globalClaims != nil {
+		claimsProvider = globalClaims
+	}
 	engineCfg := cryden.Config{
 		JWTSecret:       cfg.JWTSecret,
 		Users:           users,
@@ -359,7 +365,7 @@ func serve() {
 		// That is the price of claims that are current rather than
 		// frozen at signup, and it is why the engine calls a claims
 		// provider on the hot path only when a host asks it to.
-		AccessTokenClaims: claimsProvider(operators, metadata),
+		AccessTokenClaims: claimsProvider,
 	}
 
 	// Password hashing. Leaving Hasher unset is what selects bcrypt — the
@@ -484,7 +490,20 @@ func serve() {
 	// login_success/login_failed/token_rotated, the three that fire
 	// constantly and say nothing.
 	if webhookStore != nil {
-		engineCfg.Webhooks = &webhook.Sender{Store: webhookStore, Wake: webhookWake}
+		engineCfg.Webhooks = &webhook.Sender{
+			Store: webhookStore,
+			Wake:  webhookWake,
+			Enabled: func() bool {
+				if settingsSecrets != nil && settingsSecrets.Configured() {
+					if raw, err := settingsSecrets.Get(context.Background(), settings.KeyWebhookEndpoint); err == nil {
+						if endpoint, err := settings.UnmarshalWebhookEndpoint(raw); err == nil && endpoint.URL != "" {
+							return true
+						}
+					}
+				}
+				return cfg.WebhookURL != ""
+			},
+		}
 		engineCfg.WebhookEvents = cfg.WebhookEvents
 	}
 
@@ -543,6 +562,16 @@ func serve() {
 	// what the stale reclaim exists for — see RunOnce's own note.
 	if webhookStore != nil {
 		worker := webhook.NewWorker(webhookStore, cfg.WebhookURL, cfg.WebhookSecret)
+		worker.Endpoint = func() (string, string) {
+			if settingsSecrets != nil && settingsSecrets.Configured() {
+				if raw, err := settingsSecrets.Get(context.Background(), settings.KeyWebhookEndpoint); err == nil {
+					if endpoint, err := settings.UnmarshalWebhookEndpoint(raw); err == nil {
+						return endpoint.URL, endpoint.Secret
+					}
+				}
+			}
+			return cfg.WebhookURL, cfg.WebhookSecret
+		}
 		worker.MaxAttempts = cfg.WebhookMaxAttempts
 		worker.Wake = webhookWake
 		worker.Log = log.Default()
@@ -601,13 +630,14 @@ func serve() {
 	askAI := askai.New(settingsSecrets)
 
 	router := httpapi.NewRouter(httpapi.Deps{
-		Engine: engine,
-		DB:     db,
-		Config: cfg,
-		Audit:  audit,
-		Users:  users,
-		Meta:   metadata,
-		Hooks:  webhookStore,
+		Engine:      engine,
+		DB:          db,
+		Config:      cfg,
+		Audit:       audit,
+		Users:       users,
+		Meta:        metadata,
+		Hooks:       webhookStore,
+		WebhookWake: webhookWake,
 
 		Sessions: sessions,
 
@@ -629,6 +659,7 @@ func serve() {
 		Templates: emailTemplates,
 
 		Settings:       settingsSecrets,
+		JWTClaims:      globalClaims,
 		PasswordPolicy: activePasswordPolicy,
 
 		Reviews: reviews,
@@ -787,6 +818,16 @@ func claimsProvider(operators *operator.Store, metadata *usermeta.PostgresStore)
 		return nil
 	}
 	return usermeta.ClaimsProvider(metadata, operators)
+}
+
+// jwtClaimsProvider layers runtime global mappings onto the existing per-user
+// metadata and operator-role claims. The settings key is also what gates the
+// admin editor; without it, the provider behaves exactly as before.
+func jwtClaimsProvider(operators *operator.Store, metadata *usermeta.PostgresStore, users store.UserStore, configStore settings.Store) *jwtclaims.Provider {
+	if operators == nil && metadata == nil {
+		return nil
+	}
+	return &jwtclaims.Provider{Users: users, Metadata: metadata, Operators: operators, Store: configStore}
 }
 
 // stores is every engine store for whichever backend this deployment runs

@@ -27,6 +27,10 @@ type Sender struct {
 	// type calls.
 	Store Store
 
+	// Enabled lets runtime configuration decide whether events are queued.
+	// Nil keeps the original always-enabled behavior.
+	Enabled func() bool
+
 	// Wake is nudged, non-blockingly, after a successful enqueue. It is a
 	// hint and never a guarantee: a full buffer, a nil channel or a worker
 	// that is not running all simply mean the worker finds the row on its
@@ -95,6 +99,9 @@ type payload struct {
 // interface documents. Nothing here can panic on a plausible input, and
 // swallowing one would hide a real bug behind a log line.
 func (s *Sender) SendWebhook(ctx context.Context, event notify.WebhookEvent) error {
+	if s.Enabled != nil && !s.Enabled() {
+		return nil
+	}
 	body, err := json.Marshal(payload{
 		ID:         event.ID,
 		Type:       event.Type,

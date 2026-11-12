@@ -11,6 +11,7 @@ import (
 	"github.com/crydensync/api/askai"
 	"github.com/crydensync/api/config"
 	"github.com/crydensync/api/digest"
+	"github.com/crydensync/api/jwtclaims"
 	"github.com/crydensync/api/passwordpolicy"
 	"github.com/crydensync/api/settings"
 	"github.com/crydensync/api/shiplog"
@@ -70,7 +71,8 @@ type Deps struct {
 	// there is nothing to report on in a deployment that dispatches no
 	// webhooks, and the handler answers 404 rather than an empty list an
 	// operator would read as "nothing has failed".
-	Hooks webhook.Store
+	Hooks       webhook.Store
+	WebhookWake chan<- struct{}
 
 	// Shipped backs the admin shipped-events log — the redacted copy of
 	// the engine's log records that the cloud sink was handed. Nil unless
@@ -95,7 +97,8 @@ type Deps struct {
 	// nowhere safe to put a credential, so those endpoints answer 404
 	// not_configured rather than accepting one they would have to store in
 	// the clear. See settings.Secrets.
-	Settings *settings.Secrets
+	Settings  *settings.Secrets
+	JWTClaims *jwtclaims.Provider
 
 	// PasswordPolicy is the persistent, non-secret policy active on this API.
 	PasswordPolicy *passwordpolicy.Manager
@@ -146,12 +149,15 @@ func NewRouter(d Deps) http.Handler {
 	users := &UserHandlers{Engine: engine, Users: d.Users, Sessions: d.Sessions, Audit: d.Audit}
 	userActions := &UserActionHandlers{Engine: engine, Users: d.Users, Sessions: d.Sessions, Audit: d.Audit, OAuth: d.OAuth, TOTP: d.TOTP, PasswordPolicy: d.PasswordPolicy}
 	passwordPolicy := &PasswordPolicyHandlers{Policy: d.PasswordPolicy, Audit: d.Audit}
-	hooks := &WebhookHandlers{Store: d.Hooks}
+	adminSessions := &AdminSessionHandlers{DB: d.DB, Engine: engine, Audit: d.Audit}
+	auditLog := &AdminAuditHandlers{DB: d.DB}
+	hooks := &WebhookHandlers{Store: d.Hooks, Secrets: d.Settings, Wake: d.WebhookWake}
 	logging := &LoggingHandlers{Store: d.Shipped}
 	digests := &DigestHandlers{Engine: engine, Store: d.Digests}
 	support := &SupportHandlers{Engine: engine}
 	tuning := &TuningHandlers{Audit: d.Audit, Config: d.Config}
 	aiSettings := &SettingsHandlers{Secrets: d.Settings}
+	jwtClaims := &JWTClaimHandlers{Provider: d.JWTClaims}
 	anomalies := &AnomalyHandlers{Audit: d.Audit, Reviews: d.Reviews}
 	askAI := &WidgetHandlers{Service: d.AskAI}
 	docs := NewDocsHandler()
@@ -323,6 +329,12 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("GET /v1/admin/users/{userID}", adminOnly(func(w http.ResponseWriter, r *http.Request) {
 		users.Detail(w, r, r.PathValue("userID"))
 	}))
+	mux.HandleFunc("GET /v1/admin/sessions", adminOnly(adminSessions.List))
+	mux.HandleFunc("DELETE /v1/admin/sessions/{sessionID}", adminOnly(func(w http.ResponseWriter, r *http.Request) {
+		adminSessions.Revoke(w, r, r.PathValue("sessionID"))
+	}))
+	mux.HandleFunc("POST /v1/admin/sessions/revoke-all", adminOnly(adminSessions.RevokeAll))
+	mux.HandleFunc("GET /v1/admin/audit", adminOnly(auditLog.List))
 
 	// The account actions. Every one changes an account that is not the
 	// operator's, which is what kept this surface unwritten until the
@@ -370,6 +382,13 @@ func NewRouter(d Deps) http.Handler {
 	// endpoint here that re-queues or deletes a delivery, deliberately (see
 	// WebhookHandlers).
 	mux.HandleFunc("GET /v1/admin/webhooks/deliveries", adminOnly(hooks.Deliveries))
+	mux.HandleFunc("GET /v1/admin/webhooks", adminOnly(hooks.Endpoint))
+	mux.HandleFunc("PUT /v1/admin/webhooks", adminOnly(hooks.PutEndpoint))
+	mux.HandleFunc("DELETE /v1/admin/webhooks", adminOnly(hooks.DeleteEndpoint))
+	mux.HandleFunc("POST /v1/admin/webhooks/test", adminOnly(hooks.TestEndpoint))
+	mux.HandleFunc("GET /v1/admin/settings/jwt-claims", adminOnly(jwtClaims.Read))
+	mux.HandleFunc("PUT /v1/admin/settings/jwt-claims", adminOnly(jwtClaims.Save))
+	mux.HandleFunc("POST /v1/admin/settings/jwt-claims/preview", adminOnly(jwtClaims.Preview))
 
 	// The shipped-events log — the redacted, filtered copy of the engine's
 	// own log records that the cloud sink was handed, which is what a

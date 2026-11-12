@@ -1,12 +1,16 @@
 package httpapi
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/crydensync/api/settings"
 	"github.com/crydensync/api/webhook"
 )
 
@@ -24,7 +28,135 @@ type WebhookHandlers struct {
 	// when WEBHOOK_URL is unset, which is a wiring fact rather than a
 	// server fault — cryden's own "not configured" convention, answered as
 	// a 404.
-	Store webhook.Store
+	Store   webhook.Store
+	Secrets *settings.Secrets
+	Wake    chan<- struct{}
+}
+
+type webhookEndpointDTO struct {
+	URL       string `json:"url"`
+	Secret    string `json:"secret,omitempty"`
+	SecretSet bool   `json:"secret_set"`
+}
+
+// Endpoint reports the configured URL and whether a signing secret is stored.
+// The secret itself is never returned.
+func (h *WebhookHandlers) Endpoint(w http.ResponseWriter, r *http.Request) {
+	if h.Secrets == nil || !h.Secrets.Configured() {
+		writeErr(w, errSettingsNotConfigured)
+		return
+	}
+	raw, err := h.Secrets.Get(r.Context(), settings.KeyWebhookEndpoint)
+	if errors.Is(err, settings.ErrNotFound) {
+		writeData(w, http.StatusOK, webhookEndpointDTO{})
+		return
+	}
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	config, err := settings.UnmarshalWebhookEndpoint(raw)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeData(w, http.StatusOK, webhookEndpointDTO{URL: config.URL, SecretSet: config.Secret != ""})
+}
+
+// PutEndpoint saves a runtime webhook destination. Omitting secret preserves
+// the existing signing key, since the API never sends it back to the browser.
+func (h *WebhookHandlers) PutEndpoint(w http.ResponseWriter, r *http.Request) {
+	if h.Secrets == nil || !h.Secrets.Configured() {
+		writeErr(w, errSettingsNotConfigured)
+		return
+	}
+	var dto webhookEndpointDTO
+	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
+		writeBadRequest(w, "malformed request body")
+		return
+	}
+	if dto.Secret == "" {
+		if existing, err := h.Secrets.Get(r.Context(), settings.KeyWebhookEndpoint); err == nil {
+			current, decodeErr := settings.UnmarshalWebhookEndpoint(existing)
+			if decodeErr != nil {
+				writeErr(w, decodeErr)
+				return
+			}
+			dto.Secret = current.Secret
+		}
+	}
+	config := settings.WebhookEndpointConfig{URL: strings.TrimSpace(dto.URL), Secret: dto.Secret}
+	if err := config.Validate(); err != nil {
+		writeBadRequest(w, err.Error())
+		return
+	}
+	raw, err := json.Marshal(config)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := h.Secrets.Put(r.Context(), settings.KeyWebhookEndpoint, raw); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeData(w, http.StatusOK, webhookEndpointDTO{URL: config.URL, SecretSet: true})
+}
+
+// DeleteEndpoint clears runtime configuration and allows the environment
+// configured destination, if present, to take over again.
+func (h *WebhookHandlers) DeleteEndpoint(w http.ResponseWriter, r *http.Request) {
+	if h.Secrets == nil || !h.Secrets.Configured() {
+		writeErr(w, errSettingsNotConfigured)
+		return
+	}
+	if err := h.Secrets.Delete(r.Context(), settings.KeyWebhookEndpoint); err != nil && !errors.Is(err, settings.ErrNotFound) {
+		writeErr(w, err)
+		return
+	}
+	writeData(w, http.StatusOK, webhookEndpointDTO{})
+}
+
+// TestEndpoint queues a representative test event for the configured runtime
+// destination. Like production events, delivery happens in the worker.
+func (h *WebhookHandlers) TestEndpoint(w http.ResponseWriter, r *http.Request) {
+	if h.Store == nil || h.Secrets == nil || !h.Secrets.Configured() {
+		writeErr(w, errAdminStoresUnavailable)
+		return
+	}
+	raw, err := h.Secrets.Get(r.Context(), settings.KeyWebhookEndpoint)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	endpoint, err := settings.UnmarshalWebhookEndpoint(raw)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	var idBytes [16]byte
+	if _, err := rand.Read(idBytes[:]); err != nil {
+		writeErr(w, err)
+		return
+	}
+	id := hex.EncodeToString(idBytes[:])
+	now := time.Now().UTC()
+	body, err := json.Marshal(map[string]any{
+		"id": id, "type": "webhook.test", "occurred_at": now,
+		"metadata": map[string]string{"message": "CSAG webhook test delivery"},
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := h.Store.Enqueue(r.Context(), webhook.Delivery{EventID: id, EventType: "webhook.test", Payload: body}); err != nil {
+		writeErr(w, err)
+		return
+	}
+	select {
+	case h.Wake <- struct{}{}:
+	default:
+	}
+	writeData(w, http.StatusAccepted, map[string]any{"queued": true, "event_id": id, "endpoint_url": endpoint.URL})
 }
 
 // deliveryDTO is one row of the log. It carries the payload as raw JSON

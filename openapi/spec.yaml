@@ -458,6 +458,8 @@ components:
       properties:
         id: { type: string, format: uuid }
         type: { type: string }
+        user_id: { type: string, format: uuid }
+        email: { type: string, format: email }
         ip: { type: string }
         metadata:
           type: object
@@ -1514,6 +1516,55 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
 
+  /admin/sessions:
+    get:
+      summary: Active sessions across all accounts
+      description: Admin only. Returns paginated active sessions with account email and a device label. The response omits refresh-token hashes and session-family identifiers.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 10000, default: 0 }
+      responses:
+        '200': { description: Active session page }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+  /admin/sessions/{sessionID}:
+    delete:
+      summary: Revoke one active session
+      description: Admin only. The action is recorded in the audit log.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Session revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: The session does not exist or is no longer active.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+  /admin/sessions/revoke-all:
+    post:
+      summary: Revoke every active session
+      description: Admin only. Signs every account out, including the operator making this request. The action is recorded in the audit log.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Number of sessions revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
   /admin/oauth/health:
     get:
       summary: Reachability of each OAuth provider this API knows about
@@ -2092,6 +2143,50 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
 
+  /admin/audit:
+    get:
+      summary: Paginated audit events
+      description: Admin only. Filters engine and admin events by event type, user UUID and inclusive RFC3339 time bounds. Uses a descending created_at and id cursor so new events do not shift later pages.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: event_type
+          in: query
+          schema: { type: string, maxLength: 100 }
+        - name: user_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: since
+          in: query
+          schema: { type: string, format: date-time }
+        - name: until
+          in: query
+          schema: { type: string, format: date-time }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: One page of matching audit events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      events: { type: array, items: { $ref: '#/components/schemas/AuditEvent' } }
+                      limit: { type: integer }
+                      has_more: { type: boolean }
+                      next_cursor: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
   /admin/anomalies:
     get:
       summary: The flagged-event review queue
@@ -2231,6 +2326,82 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/webhooks:
+    get:
+      summary: Read the runtime webhook endpoint
+      description: Admin only. Returns the destination URL and whether a signing secret is configured; the secret is never returned.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Endpoint settings, empty when not configured
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [url, secret_set]
+                    properties:
+                      url: { type: string }
+                      secret_set: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+    put:
+      summary: Save the runtime webhook endpoint
+      description: Admin only. Stores the signing secret encrypted using SETTINGS_ENCRYPTION_KEY. HTTPS is required except for loopback development URLs. Omitting secret preserves the saved secret.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string, format: uri }
+                secret: { type: string, writeOnly: true }
+      responses:
+        '200': { description: Saved endpoint settings; the secret is never returned }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+    delete:
+      summary: Clear the runtime webhook endpoint
+      description: Admin only. Removes the encrypted runtime endpoint. The WEBHOOK_URL and WEBHOOK_SECRET environment values, if configured, become active again.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Runtime endpoint cleared }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/webhooks/test:
+    post:
+      summary: Queue a test webhook event
+      description: Admin only. Queues a synthetic event for the configured runtime destination. Delivery is asynchronous and appears in the delivery history.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '202':
+          description: Test event queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [queued, event_id, endpoint_url]
+                    properties:
+                      queued: { type: boolean }
+                      event_id: { type: string }
+                      endpoint_url: { type: string, format: uri }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
 
   /admin/webhooks/deliveries:
     get:
@@ -2738,6 +2909,90 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/settings/jwt-claims:
+    get:
+      summary: Read global JWT source mappings
+      description: Admin only. Returns mappings and claim names CSAG reserves. The non-secret mapping config is stored in the Postgres settings table.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Current mappings, empty when none are configured
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [mappings, reserved_claim_names]
+                    properties:
+                      mappings:
+                        type: array
+                        items:
+                          type: object
+                          required: [claim, source]
+                          properties:
+                            claim: { type: string }
+                            source: { type: string }
+                      reserved_claim_names: { type: array, items: { type: string } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Postgres settings are not configured }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+    put:
+      summary: Replace global JWT source mappings
+      description: Admin only. New mappings apply when CSAG next issues or refreshes an access token. Reserved claim names and unsupported sources are rejected.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mappings]
+              properties:
+                mappings:
+                  type: array
+                  maxItems: 32
+                  items:
+                    type: object
+                    required: [claim, source]
+                    properties:
+                      claim: { type: string }
+                      source:
+                        type: string
+                        enum: [user.id, user.email, user.created_at, user.updated_at]
+                        description: A supported source; per-user metadata can be referenced as metadata.KEY.
+      responses:
+        '200': { description: Saved mapping configuration }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Postgres settings are not configured }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/settings/jwt-claims/preview:
+    post:
+      summary: Preview additional claims for a user
+      description: Admin only. Evaluates the configured claims provider for the selected user. The response is not a signed access token.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id]
+              properties:
+                user_id: { type: string, format: uuid }
+      responses:
+        '200': { description: Current email and additional claims computed for this user }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: User does not exist or claim settings are not configured }
         '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
 
   /admin/settings/llm-provider:
