@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/crydensync/cryden/v2"
 	"github.com/crydensync/cryden/v2/store/memory"
@@ -17,6 +18,7 @@ import (
 	crydenai "github.com/crydensync/cryden/v2/ai"
 
 	"github.com/crydensync/api/askai"
+	"github.com/crydensync/api/config"
 	"github.com/crydensync/api/settings"
 )
 
@@ -122,7 +124,11 @@ func newWidgetFixture(t *testing.T, intent crydenai.QueryIntent, withService boo
 		configure(secrets)
 	}
 
-	deps := Deps{Engine: engine, Settings: secrets}
+	deps := Deps{
+		Engine:   engine,
+		Settings: secrets,
+		Config:   config.Config{AskAIRateLimit: 10, AskAIRateLimitWindow: time.Minute},
+	}
 	seen := &intentRecorder{}
 	if withService {
 		deps.AskAI = askai.NewWithProviders(secrets, func(settings.LLMProviderConfig, settings.DatabaseProviderConfig) (crydenai.LLMProvider, crydenai.QueryableStore, io.Closer, error) {
@@ -316,6 +322,33 @@ func TestAskAIReturnsTheAnswerAndRowCount(t *testing.T) {
 	}
 	if data.RowCount != 2 {
 		t.Errorf("row_count = %d, want 2", data.RowCount)
+	}
+}
+
+func TestAskAIRateLimitUsesTheVerifiedUserIdentity(t *testing.T) {
+	f := newWidgetFixture(t, sessionsIntent(), true, func(secrets *settings.Secrets) { enableWidget(t, secrets, nil) })
+	for i := 0; i < 10; i++ {
+		rec := f.ask(t, `{"question":"show my sessions"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d status = %d, want 200 (body %s)", i+1, rec.Code, rec.Body.String())
+		}
+	}
+	blocked := f.ask(t, `{"question":"show my sessions"}`)
+	if blocked.Code != http.StatusTooManyRequests {
+		t.Fatalf("11th user request status = %d, want 429 (body %s)", blocked.Code, blocked.Body.String())
+	}
+	if code := decodeAPIError(t, blocked); code != "rate_limited" {
+		t.Errorf("code = %q, want rate_limited", code)
+	}
+
+	// The same source IP does not share the end user's budget. This valid
+	// operator token is still authenticated as its own account on this route.
+	otherUser := f.do(t, f.adminToken, `{"question":"show my sessions"}`, map[string]string{"Origin": widgetTestOrigin})
+	if otherUser.Code != http.StatusOK {
+		t.Fatalf("different verified user status = %d, want 200 (body %s)", otherUser.Code, otherUser.Body.String())
+	}
+	if got := len(f.seen.all()); got != 11 {
+		t.Errorf("query count = %d, want 10 for the limited user and one for the other user", got)
 	}
 }
 

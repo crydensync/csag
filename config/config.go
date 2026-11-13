@@ -16,15 +16,17 @@ import (
 type Config struct {
 	// DatabaseURL and SQLitePath select the backend and are mutually
 	// exclusive — Load refuses both or neither. See UsesSQLite.
-	DatabaseURL         string
-	SQLitePath          string
-	SkipAutoMigrate     bool
-	JWTSecret           string
-	Port                string
-	CORSOrigins         []string
-	AccessTokenTTL      time.Duration
-	EdgeRateLimit       int
-	EdgeRateLimitWindow time.Duration
+	DatabaseURL          string
+	SQLitePath           string
+	SkipAutoMigrate      bool
+	JWTSecret            string
+	Port                 string
+	CORSOrigins          []string
+	AccessTokenTTL       time.Duration
+	EdgeRateLimit        int
+	EdgeRateLimitWindow  time.Duration
+	AskAIRateLimit       int
+	AskAIRateLimitWindow time.Duration
 
 	// BaseURL is this api deployment's own public URL, used to build
 	// OAuth callback URLs (e.g. BaseURL + "/v1/oauth/google/callback")
@@ -369,6 +371,18 @@ func Load() (Config, error) {
 			return cfg, fmt.Errorf("EDGE_RATE_LIMIT must be a number: %w", err)
 		}
 		cfg.EdgeRateLimit = n
+	}
+
+	// The widget makes a paid model call for each accepted question. Keep a
+	// verified-user limit in addition to the coarse per-IP edge guard.
+	cfg.AskAIRateLimit = 10
+	cfg.AskAIRateLimitWindow = time.Minute
+	if v := os.Getenv("ASK_AI_RATE_LIMIT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return cfg, fmt.Errorf("ASK_AI_RATE_LIMIT must be a positive number")
+		}
+		cfg.AskAIRateLimit = n
 	}
 
 	// OAuth is deliberately optional at config-load time — a

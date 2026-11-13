@@ -162,6 +162,7 @@ func NewRouter(d Deps) http.Handler {
 	jwtClaims := &JWTClaimHandlers{Provider: d.JWTClaims}
 	anomalies := &AnomalyHandlers{Audit: d.Audit, Reviews: d.Reviews}
 	askAI := &WidgetHandlers{Service: d.AskAI}
+	widgetRateLimiter := NewWidgetUserRateLimiter(d.Config.AskAIRateLimit, d.Config.AskAIRateLimitWindow)
 	adminAI := &AdminAIHandlers{Service: d.AskAI, LogReader: d.Shipped, Audit: d.Audit}
 	docs := NewDocsHandler()
 
@@ -282,7 +283,7 @@ func NewRouter(d Deps) http.Handler {
 	// sits here among the authenticated routes rather than in the /v1/admin
 	// block below because an end user is not an operator and this is not an
 	// admin surface — see WidgetHandlers.
-	mux.HandleFunc("POST /v1/ask-ai", RequireAuth(engine, askAI.Ask))
+	mux.HandleFunc("POST /v1/ask-ai", RequireAuth(engine, WithWidgetUserRateLimit(widgetRateLimiter, askAI.Ask)))
 
 	// Admin endpoints. Everything under /v1/admin goes through adminOnly
 	// above — RequireAdmin on a Postgres deployment, which needs the `role`

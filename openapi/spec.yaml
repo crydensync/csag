@@ -1356,10 +1356,10 @@ paths:
         Two things worth knowing before calling it. It is slow by the
         standards of the rest of this API — at minimum one call to the
         configured model provider — and it costs the deployment money
-        per question, which is why `question` is length-bounded and why
-        this path is the one most worth putting a per-user limit in
-        front of. As of this version it is bounded only by whatever edge
-        rate limit the deployment runs.
+        per question, which is why `question` is length-bounded. This path
+        also has a per-verified-user limit of 10 questions per one-minute
+        window by default, configurable with ASK_AI_RATE_LIMIT. Like the
+        edge limiter, its counters are in memory per API process.
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -1407,6 +1407,13 @@ paths:
             would break every non-browser client while stopping nobody,
             since a caller able to forge an allowlisted origin can also
             simply omit it.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '429':
+          description: >
+            rate_limited — this verified user has reached the configured
+            Ask-AI question limit for the current one-minute window.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }

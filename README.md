@@ -174,6 +174,7 @@ Magic-link login needs no extra configuration — it reuses the same `Verificati
 Two independent layers:
 - **Engine-level** (per-user, on login/signup/magic-link) — already built into CrydenSync itself. `RATE_LIMIT_ATTEMPTS` / `RATE_LIMIT_WINDOW_SECONDS` tune it (default 10 per minute). In-memory and per-process by default, which is correct for exactly one instance; set `REDIS_URL` and every replica counts against one shared window instead of each keeping its own. Note the trade-off that comes with that: cryden fails those three entry points closed while Redis is unreachable, rather than letting them run unlimited.
 - **Edge-level** (per-IP, applied to every request) — coarser, protects the whole API surface from being hammered generally. Configurable via `EDGE_RATE_LIMIT` (default 100 requests/minute per IP). Still in-memory and per-process, `REDIS_URL` or not — a shared window for the coarse per-IP guard is its own decision, not this one.
+- **Ask-AI widget** (per verified user, only on `POST /v1/ask-ai`) — limits model spend to 10 questions per minute by default. Set `ASK_AI_RATE_LIMIT` to change the per-user count; its one-minute window is fixed. This in-memory limit is per API process. Edge limiting still applies too.
 
 ## Anomaly detection
 
@@ -573,7 +574,7 @@ The LLM API key and the database connection string are sealed with **AES-256-GCM
 - **`"*"` as an origin is refused by name**, with the reason in the message: this widget answers questions about the signed-in user's sessions and audit events, so a wildcard origin would let any page on the internet ask them through a visitor's browser.
 - **The refusal names neither the entity nor the scope.** That error reaches an end user through the widget; listing the configured entities would be describing the console's schema to whoever is typing questions at it.
 - **A disabled widget may be otherwise empty**, so switching the feature off does not require filling in fields that are about to stop mattering. Anything that *is* filled in is still validated, so a form cannot store a value that was never checked and would be rejected the moment it was switched on.
-- **No embed snippet is returned.** The snippet is markup the console renders into its own pages, and this repo has no opinion on another repo's markup. An earlier version of this note gave a different reason — that the URL in a snippet would name an endpoint that did not exist — and that expired in spec 1.7, when `POST /v1/ask-ai` started serving the widget. What this endpoint owes the console is the configuration a snippet is built from.
+- **No embed snippet is returned by the API.** The console builds the installation markup from this configuration and serves the browser script itself; the API remains responsible for checking the verified user token and request origin.
 
 ### Serving the widget
 
@@ -592,7 +593,7 @@ The LLM API key and the database connection string are sealed with **AES-256-GCM
 - **Settings are read per question, not cached behind an invalidation.** Three short reads and two AES-GCM opens against one model call that takes hundreds of milliseconds at best — the trade is lopsided, and the failure mode of the other side is a saved settings change that does not take effect until a restart, or takes effect only if every future writer remembers to poke a hook. What *is* cached is the built provider pair, keyed on a SHA-256 digest of the settings it was built from. Hashed rather than held, because two of the three inputs are credentials and a cache key lives as long as the process does.
 - **Building the provider is cheap on purpose.** `aiprovider.NewPostgresSnapshot` uses `sql.Open`, which does not connect, so a rebuild is an allocation rather than a round trip and a stored connection that has since gone bad is reported by the query that uses it. That is what keeps a broken setting from being a startup failure.
 - **Switched off and never configured are one answer** — `404 ask_ai_widget_disabled`. The stored config's zero value is disabled, so there is no way to tell them apart, and there is no reason a caller should care. `404 not_configured` is the different case: the widget is on but the deployment has no LLM provider or no read-only database stored.
-- **It costs money per question and is not rate-limited per user.** It is bounded only by `EDGE_RATE_LIMIT`, which counts requests per edge, not per account. A real per-user limit needs a policy this repo has not decided — the numbers are deployment-specific — so it is recorded as owed in `PROGRESS.md` rather than invented here.
+- **Model spend is bounded per user and per IP.** The widget allows 10 requests per verified user per minute by default (`ASK_AI_RATE_LIMIT`), in addition to the coarse per-IP `EDGE_RATE_LIMIT`. Both are in-memory and per process, so a multi-instance deployment has independent windows on each replica.
 
 ## Design notes
 

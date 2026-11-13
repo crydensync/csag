@@ -60,6 +60,10 @@ var errNotImplementedOnSQLite = errors.New("the admin console requires a Postgre
 // code to the client; the distinction only matters server-side.
 var errEdgeRateLimited = errors.New("too many requests")
 
+// errWidgetRateLimited is the per-verified-user budget for model-backed
+// Ask-AI requests.
+var errWidgetRateLimited = errors.New("too many Ask-AI requests")
+
 // errAdminStoresUnavailable is returned by an admin handler whose backing
 // stores were never wired — see httpapi.Deps, whose store fields a test
 // may legitimately leave nil. That is a wiring fact and not a server
@@ -98,6 +102,8 @@ func mapError(err error) apiError {
 		return apiError{http.StatusNotImplemented, "not_implemented_on_sqlite", "the admin console requires a Postgres backend; this deployment runs on SQLite"}
 	case errors.Is(err, errEdgeRateLimited):
 		return apiError{http.StatusTooManyRequests, "rate_limited", "too many requests, please slow down"}
+	case errors.Is(err, errWidgetRateLimited):
+		return apiError{http.StatusTooManyRequests, "rate_limited", "you have reached the Ask-AI question limit; try again later"}
 	case errors.Is(err, errAdminStoresUnavailable):
 		return apiError{http.StatusNotFound, "not_configured", "this report is not available on this deployment"}
 	case errors.Is(err, digest.ErrDeliveryUnavailable):
