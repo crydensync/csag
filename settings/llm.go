@@ -4,20 +4,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 )
 
-// LLMProviderKindAnthropic is the one provider this repo can construct a
-// live ai.LLMProvider for. A kind rather than a hardcoded shape, because
-// the stored config has to say which client to build and a console needs
-// something to put in a dropdown — but the list is deliberately short:
-// this repo ships an implementation for what it names and nothing else,
-// so "openai" here would be a setting that saves and then does nothing.
-const LLMProviderKindAnthropic = "anthropic"
+const (
+	LLMProviderKindAnthropic        = "anthropic"
+	LLMProviderKindOpenAICompatible = "openai-compatible"
+)
 
-// DefaultLLMModel is what an operator gets if they configure a provider
-// without naming a model. Claude Opus 5 is the current default for this
-// kind of work.
+// DefaultLLMModel is a safe starter model identifier for Anthropic.
 const DefaultLLMModel = "claude-opus-5"
 
 // The bounds on MaxTokens. The floor is not zero: a provider asked for
@@ -32,7 +28,11 @@ const (
 	// reasoning about it. The output here is a small JSON object, not
 	// prose, so this is generous rather than tight.
 	DefaultLLMMaxTokens = 2048
+	DefaultLLMRPM       = 60
+	MaxLLMRPM           = 10000
 )
+
+const DefaultLLMTemperature = 0.2
 
 // ErrInvalidLLMProvider means the supplied configuration cannot back a
 // working provider. Returned instead of storing it, because a saved
@@ -45,14 +45,13 @@ var ErrInvalidLLMProvider = errors.New("settings: invalid LLM provider configura
 // handed to Secrets, so it exists in memory and inside the ciphertext and
 // nowhere else.
 type LLMProviderConfig struct {
-	// Kind names which client to build. See LLMProviderKindAnthropic.
-	Kind string `json:"kind"`
-	// Model is the vendor's model id.
-	Model string `json:"model"`
-	// APIKey is the credential. Never returned by a read — see Redacted.
-	APIKey string `json:"api_key"`
-	// MaxTokens bounds one response.
-	MaxTokens int `json:"max_tokens"`
+	Kind        string  `json:"kind"`
+	Model       string  `json:"model"`
+	APIKey      string  `json:"api_key"`
+	BaseURL     string  `json:"base_url,omitempty"`
+	MaxTokens   int     `json:"max_tokens"`
+	Temperature float64 `json:"temperature"`
+	RPM         int     `json:"rpm"`
 }
 
 // Validate checks a configuration that is about to be stored. The stored
@@ -60,19 +59,33 @@ type LLMProviderConfig struct {
 // place the rule can be enforced — a handler that trusted a form would be
 // enforcing it in the wrong layer.
 func (c LLMProviderConfig) Validate() error {
-	if c.Kind != LLMProviderKindAnthropic {
-		return fmt.Errorf("%w: unknown provider kind %q, this api can only build %q",
-			ErrInvalidLLMProvider, c.Kind, LLMProviderKindAnthropic)
+	if c.Kind != LLMProviderKindAnthropic && c.Kind != LLMProviderKindOpenAICompatible {
+		return fmt.Errorf("%w: kind must be anthropic or openai-compatible", ErrInvalidLLMProvider)
 	}
-	if strings.TrimSpace(c.Model) == "" {
-		return fmt.Errorf("%w: model is required", ErrInvalidLLMProvider)
+	if strings.TrimSpace(c.Model) == "" || strings.TrimSpace(c.APIKey) == "" {
+		return fmt.Errorf("%w: model and api_key are required", ErrInvalidLLMProvider)
 	}
-	if strings.TrimSpace(c.APIKey) == "" {
-		return fmt.Errorf("%w: api_key is required", ErrInvalidLLMProvider)
+	if c.Kind == LLMProviderKindOpenAICompatible || strings.TrimSpace(c.BaseURL) != "" {
+		if err := validateProviderBaseURL(c.BaseURL); err != nil {
+			return err
+		}
 	}
 	if c.MaxTokens < MinLLMMaxTokens || c.MaxTokens > MaxLLMMaxTokens {
-		return fmt.Errorf("%w: max_tokens must be between %d and %d, got %d",
-			ErrInvalidLLMProvider, MinLLMMaxTokens, MaxLLMMaxTokens, c.MaxTokens)
+		return fmt.Errorf("%w: max_tokens must be between %d and %d", ErrInvalidLLMProvider, MinLLMMaxTokens, MaxLLMMaxTokens)
+	}
+	if c.Temperature < 0 || c.Temperature > 2 {
+		return fmt.Errorf("%w: temperature must be between 0 and 2", ErrInvalidLLMProvider)
+	}
+	if c.RPM < 1 || c.RPM > MaxLLMRPM {
+		return fmt.Errorf("%w: rpm must be between 1 and %d", ErrInvalidLLMProvider, MaxLLMRPM)
+	}
+	return nil
+}
+
+func validateProviderBaseURL(value string) error {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("%w: base_url must be an http(s) URL without credentials, query or fragment", ErrInvalidLLMProvider)
 	}
 	return nil
 }
@@ -88,11 +101,14 @@ func (c LLMProviderConfig) Validate() error {
 // encrypted at rest is that it is worth stealing.
 func (c LLMProviderConfig) Redacted() RedactedLLMProvider {
 	return RedactedLLMProvider{
-		Kind:       c.Kind,
-		Model:      c.Model,
-		MaxTokens:  c.MaxTokens,
-		APIKeySet:  c.APIKey != "",
-		Configured: true,
+		Kind:        c.Kind,
+		Model:       c.Model,
+		BaseURL:     c.BaseURL,
+		MaxTokens:   c.MaxTokens,
+		Temperature: c.Temperature,
+		RPM:         c.RPM,
+		APIKeySet:   c.APIKey != "",
+		Configured:  true,
 	}
 }
 
@@ -101,9 +117,12 @@ func (c LLMProviderConfig) Redacted() RedactedLLMProvider {
 // field, so a handler cannot accidentally serialise the credential by
 // using the wrong type — the credential is not a field here at all.
 type RedactedLLMProvider struct {
-	Kind      string `json:"kind"`
-	Model     string `json:"model"`
-	MaxTokens int    `json:"max_tokens"`
+	Kind        string  `json:"kind"`
+	Model       string  `json:"model"`
+	BaseURL     string  `json:"base_url"`
+	MaxTokens   int     `json:"max_tokens"`
+	Temperature float64 `json:"temperature"`
+	RPM         int     `json:"rpm"`
 	// APIKeySet says whether a credential is stored. Enough for a console
 	// to render "••••••••  saved" versus "not set", and not enough to
 	// reconstruct anything.
@@ -131,6 +150,19 @@ func UnmarshalLLMProvider(plaintext []byte) (LLMProviderConfig, error) {
 	var c LLMProviderConfig
 	if err := json.Unmarshal(plaintext, &c); err != nil {
 		return LLMProviderConfig{}, fmt.Errorf("settings: decoding the stored LLM provider: %w", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(plaintext, &fields); err != nil {
+		return LLMProviderConfig{}, fmt.Errorf("settings: decoding the stored LLM provider fields: %w", err)
+	}
+	if _, exists := fields["temperature"]; !exists {
+		c.Temperature = DefaultLLMTemperature
+	}
+	if c.RPM == 0 {
+		c.RPM = DefaultLLMRPM
+	}
+	if c.MaxTokens == 0 {
+		c.MaxTokens = DefaultLLMMaxTokens
 	}
 	return c, nil
 }

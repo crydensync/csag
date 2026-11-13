@@ -131,6 +131,9 @@ func TestSettingsRoutesAreGatedByRequireAdmin(t *testing.T) {
 		{http.MethodGet, llmProviderPath},
 		{http.MethodPut, llmProviderPath},
 		{http.MethodDelete, llmProviderPath},
+		{http.MethodPost, llmProviderPath + "/test"},
+		{http.MethodPost, llmProviderPath + "/models"},
+		{http.MethodGet, llmProviderPath + "/usage"},
 		{http.MethodGet, databaseProviderPath},
 		{http.MethodPut, databaseProviderPath},
 		{http.MethodDelete, databaseProviderPath},
@@ -153,6 +156,41 @@ func TestSettingsRoutesAreGatedByRequireAdmin(t *testing.T) {
 				t.Errorf("ordinary user: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
 			}
 		})
+	}
+}
+
+func TestLLMProviderTestAndModelsUseConfiguredCompatibleEndpoint(t *testing.T) {
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer provider-secret" {
+			t.Errorf("provider Authorization = %q", r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/chat/completions":
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"entity\":\"users\",\"filters\":[],\"aggregate\":\"count\",\"group_by\":\"\",\"limit\":1}"}}]}`))
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"model-x"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer provider.Close()
+	f := newSettingsFixture(t, testSettingsKey)
+
+	config := `{"kind":"openai-compatible","model":"model-x","api_key":"provider-secret","base_url":"` + provider.URL + `/v1","max_tokens":1024,"temperature":0.2,"rpm":10}`
+	tested := f.do(t, http.MethodPost, llmProviderPath+"/test", f.adminToken, config)
+	if tested.Code != http.StatusOK {
+		t.Fatalf("test endpoint status = %d, body %s", tested.Code, tested.Body.String())
+	}
+	if strings.Contains(tested.Body.String(), "provider-secret") {
+		t.Fatalf("test response disclosed provider credential: %s", tested.Body.String())
+	}
+	models := f.do(t, http.MethodPost, llmProviderPath+"/models", f.adminToken, `{"api_key":"provider-secret","base_url":"`+provider.URL+`/v1"}`)
+	if models.Code != http.StatusOK || !strings.Contains(models.Body.String(), "model-x") {
+		t.Fatalf("models status = %d, body %s", models.Code, models.Body.String())
+	}
+	if strings.Contains(models.Body.String(), "provider-secret") {
+		t.Fatalf("models response disclosed provider credential: %s", models.Body.String())
 	}
 }
 

@@ -540,6 +540,9 @@ The AI-assisted admin features need two things only this repo can supply, becaus
 
 ```
 GET|PUT|DELETE /v1/admin/settings/llm-provider
+POST /v1/admin/settings/llm-provider/test
+POST /v1/admin/settings/llm-provider/models
+GET /v1/admin/settings/llm-provider/usage
 GET|PUT|DELETE /v1/admin/settings/database-provider
 GET|PUT|DELETE /v1/admin/settings/ask-ai-widget
 ```
@@ -547,6 +550,12 @@ GET|PUT|DELETE /v1/admin/settings/ask-ai-widget
 These are one of the admin surface's three write blocks, and they are the other half of the read-only rule rather than a hole in it. A tuning suggestion pre-fills one of these forms; an operator presses save; this is what handles that save. No AI-assisted handler in this repo holds a reference to any of them, and none accepts a suggestion as input.
 
 All three answer `404 not_configured` when `SETTINGS_ENCRYPTION_KEY` is unset — without a key there is nowhere safe to put a credential, so the API refuses rather than storing one in the clear.
+
+### LLM providers
+
+The API supports its Anthropic Messages adapter and a provider-neutral OpenAI-compatible chat-completions adapter. Configure the latter with a base URL, API key and model id. Any hosted or self-hosted service implementing that protocol can be used without adding a vendor-specific branch. A service using a different wire protocol needs an adapter. The model list action calls the compatible `/models` route; model identifiers can also be entered directly.
+
+Provider settings include max tokens, temperature and a per-provider requests-per-minute limit. `POST .../test` makes a bounded test request without saving the supplied configuration. `GET .../usage` reports in-process request, success, failure, rate-limit and latency counters since the current process started; they reset on restart and are not billing or token counts. Credentials are sent to provider hosts only from the API process and never returned by these routes.
 
 ### Credentials
 

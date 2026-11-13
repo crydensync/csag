@@ -211,6 +211,8 @@ func mapError(err error) apiError {
 		return apiError{http.StatusBadRequest, "invalid_database_provider", "that database provider configuration is not usable"}
 	case errors.Is(err, settings.ErrInvalidAskAIWidget):
 		return apiError{http.StatusBadRequest, "invalid_ask_ai_widget", "that ask-ai widget configuration is not usable"}
+	case errors.Is(err, aiprovider.ErrRPMExceeded):
+		return apiError{http.StatusTooManyRequests, "llm_rate_limited", "the configured model requests-per-minute limit has been reached"}
 	// The read-only check. A role that can write is refused outright
 	// rather than stored with a warning: cryden's design decision is that
 	// this credential boundary, not the allowlist, is what makes the AI

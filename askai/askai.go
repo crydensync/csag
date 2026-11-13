@@ -101,10 +101,10 @@ type Service struct {
 // scope check is build's job, not the factory's, so replacing this still
 // exercises the real scope enforcement.
 //
-// The default is the Anthropic provider over the stored credential and
-// the Postgres snapshot over the stored read-only connection. A host
-// that wants a different LLM backend supplies its own, and so does a
-// test that needs to see what reached the query surface.
+// The default is the configured provider adapter over the stored credential
+// and the Postgres snapshot over the stored read-only connection. A host
+// that uses a different wire protocol supplies its own adapter, and so does
+// a test that needs to see what reached the query surface.
 type Providers func(
 	llm settings.LLMProviderConfig,
 	db settings.DatabaseProviderConfig,
@@ -114,11 +114,7 @@ type Providers func(
 // over the stored credential, and the snapshot over the stored read-only
 // connection.
 func defaultProviders(llm settings.LLMProviderConfig, db settings.DatabaseProviderConfig) (crydenai.LLMProvider, crydenai.QueryableStore, io.Closer, error) {
-	provider, err := aiprovider.NewAnthropic(aiprovider.AnthropicConfig{
-		APIKey:    llm.APIKey,
-		Model:     llm.Model,
-		MaxTokens: llm.MaxTokens,
-	})
+	provider, err := aiprovider.NewLLM(llm)
 	if err != nil {
 		return nil, nil, nil, err
 	}

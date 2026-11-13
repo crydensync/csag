@@ -711,9 +711,11 @@ components:
       properties:
         kind:
           type: string
+          enum: [anthropic, openai-compatible]
           description: >
-            Which provider implementation to build. One value today:
-            "anthropic".
+            Anthropic Messages API or the common OpenAI-compatible chat
+            completions protocol. Compatible hosts are selected by base_url,
+            so adding a vendor using that protocol needs no vendor adapter.
         model:
           type: string
           description: >
@@ -727,13 +729,27 @@ components:
             The provider credential. Required on every write — see PUT
             on this path for why "blank keeps the existing one" is
             refused. Sealed before storage and never returned.
+        base_url:
+          type: string
+          format: uri
+          description: Required for openai-compatible; optional for an Anthropic-compatible endpoint.
         max_tokens:
           type: integer
           minimum: 256
           maximum: 8192
-          description: >
-            Ceiling on a single model response. Defaults when omitted
-            (0), rather than failing validation.
+          default: 2048
+          description: Ceiling on a single model response.
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+          default: 0.2
+        rpm:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          default: 60
+          description: Per-provider requests per minute.
 
     RedactedLLMProvider:
       type: object
@@ -749,9 +765,14 @@ components:
         model:
           type: string
           description: The stored model id, or empty when none is stored.
+        base_url:
+          type: string
+          description: Configured endpoint URL, if applicable.
         max_tokens:
           type: integer
           description: The stored ceiling, or 0 when none is stored.
+        temperature: { type: number }
+        rpm: { type: integer }
         api_key_set:
           type: boolean
           description: Whether a credential is stored. Says nothing about whether it still works.
@@ -3412,6 +3433,51 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/settings/llm-provider/test:
+    post:
+      summary: Test an LLM provider configuration
+      description: Admin only. Makes one bounded provider call and returns status without storing or returning the credential.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LLMProviderInput' }
+      responses:
+        '200': { description: Provider responded with a supported query intent }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /admin/settings/llm-provider/models:
+    post:
+      summary: List models from an OpenAI-compatible endpoint
+      description: Admin only. The API key is used server-side and never returned.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [api_key, base_url]
+              properties:
+                api_key: { type: string }
+                base_url: { type: string, format: uri }
+      responses:
+        '200': { description: Available model identifiers }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /admin/settings/llm-provider/usage:
+    get:
+      summary: Read aggregate LLM usage counters
+      description: Admin only. Counters cover the lifetime of this API process and reset on restart.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Provider request, success, failure, rate limit, latency and timestamp counters }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /admin/settings/database-provider:
     get:
