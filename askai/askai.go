@@ -63,6 +63,11 @@ var (
 	// deployment fault, so both are one 400 with the reason in the
 	// message rather than two codes nothing would branch on.
 	ErrInvalidQuestion = errors.New("askai: invalid question")
+
+	// ErrComposerUnavailable means the configured LLM provider can parse
+	// safe query intents but does not implement the optional answer
+	// composer required by the summary modes.
+	ErrComposerUnavailable = errors.New("askai: the configured provider cannot compose answers")
 )
 
 // Service answers widget questions. It holds no state of its own beyond
@@ -280,11 +285,113 @@ func (s *Service) AdminQuery(ctx context.Context, question string) (AdminQueryRe
 	return AdminQueryResult{Entity: intent.Entity, Columns: result.Columns, Rows: result.Rows, RowCount: len(result.Rows)}, nil
 }
 
+// AdminAudit runs a natural-language question through the same allowlisted
+// query path as AdminQuery, and requires the resulting intent to stay on the
+// audit_events entity. This mode cannot broaden an audit question into a user
+// or session query.
+func (s *Service) AdminAudit(ctx context.Context, question string) (AdminQueryResult, error) {
+	if strings.TrimSpace(question) == "" || len(question) > maxQuestionLength {
+		return AdminQueryResult{}, fmt.Errorf("%w: question must contain 1-%d characters", ErrInvalidQuestion, maxQuestionLength)
+	}
+	ready, err := s.adminProviders(ctx)
+	if err != nil {
+		return AdminQueryResult{}, err
+	}
+	intent, err := ready.provider.ParseQueryIntent(ctx, question)
+	if err != nil {
+		return AdminQueryResult{}, err
+	}
+	if intent.Entity != "audit_events" {
+		return AdminQueryResult{}, crydenai.ErrUnsafeQueryIntent
+	}
+	result, err := crydenai.ExecuteIntent(ctx, ready.store, intent)
+	if err != nil {
+		return AdminQueryResult{}, err
+	}
+	return AdminQueryResult{Entity: intent.Entity, Columns: result.Columns, Rows: result.Rows, RowCount: len(result.Rows)}, nil
+}
+
+// AdminAsk composes a plain-language answer from rows produced by the existing
+// validated, read-only admin query pipeline. The model receives no store or
+// write-capable dependency.
+func (s *Service) AdminAsk(ctx context.Context, question string) (AdminAIAnswer, error) {
+	query, err := s.AdminQuery(ctx, question)
+	if err != nil {
+		return AdminAIAnswer{}, err
+	}
+	return s.ComposeAdminAnswer(ctx, question, query.Entity, crydenai.QueryResult{
+		Columns: query.Columns,
+		Rows:    query.Rows,
+	})
+}
+
+// ComposeAdminAnswer gives the provider only a question and an already-read
+// result. SourceEntity and RowCount are set by code so the model cannot author
+// its own citation.
+func (s *Service) ComposeAdminAnswer(ctx context.Context, question, sourceEntity string, result crydenai.QueryResult) (AdminAIAnswer, error) {
+	if strings.TrimSpace(question) == "" || len(question) > maxQuestionLength {
+		return AdminAIAnswer{}, fmt.Errorf("%w: question must contain 1-%d characters", ErrInvalidQuestion, maxQuestionLength)
+	}
+	if len(result.Rows) == 0 {
+		return AdminAIAnswer{
+			Answer:       "No rows matched the question.",
+			SourceEntity: sourceEntity,
+			RowCount:     0,
+		}, nil
+	}
+	ready, err := s.adminProviders(ctx)
+	if err != nil {
+		return AdminAIAnswer{}, err
+	}
+	composer, ok := ready.provider.(interface {
+		ComposeAnswer(context.Context, string, crydenai.QueryResult) (string, error)
+	})
+	if !ok {
+		return AdminAIAnswer{}, ErrComposerUnavailable
+	}
+	answer, err := composer.ComposeAnswer(ctx, question, result)
+	if err != nil {
+		return AdminAIAnswer{}, err
+	}
+	return AdminAIAnswer{
+		Answer:       answer,
+		SourceEntity: sourceEntity,
+		RowCount:     len(result.Rows),
+	}, nil
+}
+
+func (s *Service) adminProviders(ctx context.Context) (*built, error) {
+	llmRaw, err := s.secrets.Get(ctx, settings.KeyLLMProvider)
+	if errors.Is(err, settings.ErrNotFound) {
+		return nil, ErrNotConfigured
+	}
+	if err != nil {
+		return nil, err
+	}
+	dbRaw, err := s.secrets.Get(ctx, settings.KeyDatabaseProvider)
+	if errors.Is(err, settings.ErrNotFound) {
+		return nil, ErrNotConfigured
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s.buildAdmin(llmRaw, dbRaw)
+}
+
 type AdminQueryResult struct {
 	Entity   string     `json:"entity"`
 	Columns  []string   `json:"columns"`
 	Rows     [][]string `json:"rows"`
 	RowCount int        `json:"row_count"`
+}
+
+// AdminAIAnswer carries a model-written summary and its server-generated
+// source citation. The model never supplies SourceEntity or RowCount.
+type AdminAIAnswer struct {
+	Answer       string `json:"answer"`
+	SourceEntity string `json:"source_entity"`
+	RowCount     int    `json:"row_count"`
+	Since        string `json:"since,omitempty"`
 }
 
 func (s *Service) buildAdmin(llmRaw, dbRaw []byte) (*built, error) {

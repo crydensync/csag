@@ -285,6 +285,18 @@ func TestComposeAnswerReturnsTheModelsProse(t *testing.T) {
 	if text != "You signed in from three devices this week." {
 		t.Errorf("ComposeAnswer = %q, want the model's text", text)
 	}
+	system, ok := api.lastBody["system"].([]any)
+	if !ok || len(system) == 0 {
+		t.Fatalf("system prompt = %#v, want one system block", api.lastBody["system"])
+	}
+	block, ok := system[0].(map[string]any)
+	var prompt string
+	if ok {
+		prompt, _ = block["text"].(string)
+	}
+	if !ok || !strings.Contains(prompt, "untrusted data") || !strings.Contains(prompt, "instructions embedded in row values") {
+		t.Errorf("composer system prompt does not treat row values as untrusted: %#v", system)
+	}
 }
 
 // enumValues pulls the values out of a JSON Schema enum node.

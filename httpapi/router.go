@@ -162,13 +162,13 @@ func NewRouter(d Deps) http.Handler {
 	jwtClaims := &JWTClaimHandlers{Provider: d.JWTClaims}
 	anomalies := &AnomalyHandlers{Audit: d.Audit, Reviews: d.Reviews}
 	askAI := &WidgetHandlers{Service: d.AskAI}
-	adminAI := &AdminAIHandlers{Service: d.AskAI}
+	adminAI := &AdminAIHandlers{Service: d.AskAI, LogReader: d.Shipped, Audit: d.Audit}
 	docs := NewDocsHandler()
 
 	// The gate for every route under /v1/admin, resolved once. On a
 	// Postgres deployment this is RequireAdmin; on a SQLite one it is a
 	// flat 501, because the console's tables are Postgres-only. Routing
-	// all 25 admin registrations through this one value is deliberate —
+	// every admin registration through this one value is deliberate —
 	// it is what makes "the whole admin console needs DATABASE_URL" a
 	// property of the router rather than a list to keep in sync. See
 	// AdminOnly.
@@ -402,6 +402,10 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("GET /v1/admin/settings/logging", adminOnly(loggingSettings.Read))
 	mux.HandleFunc("PUT /v1/admin/settings/logging", adminOnly(loggingSettings.Save))
 	mux.HandleFunc("POST /v1/admin/ai/query", adminOnly(adminAI.Query))
+	mux.HandleFunc("POST /v1/admin/ai/logs", adminOnly(adminAI.Logs))
+	mux.HandleFunc("POST /v1/admin/ai/anomalies-scan", adminOnly(adminAI.AnomaliesScan))
+	mux.HandleFunc("POST /v1/admin/ai/audit", adminOnly(adminAI.AuditQuery))
+	mux.HandleFunc("POST /v1/admin/ai/ask", adminOnly(adminAI.Ask))
 
 	// The weekly digest, and the history of the ones the schedule built.
 	//

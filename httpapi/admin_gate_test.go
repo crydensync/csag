@@ -4,12 +4,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/crydensync/api/config"
 )
 
-// adminPaths is one route from each block under /v1/admin, not all 25 —
+// adminPaths is one route from each block under /v1/admin, not every route —
 // the point of AdminOnly is that a route added later inherits the answer,
 // so what needs pinning is that the gate is applied per block rather than
 // that any particular list of paths is complete. Add a route to a new
@@ -92,6 +93,27 @@ func TestTier6AdminSurfaceIsNotAnswering501OnPostgres(t *testing.T) {
 
 			if rec.Code != http.StatusUnauthorized {
 				t.Fatalf("GET %s = %d, want 401 from RequireAdmin — body: %s", path, rec.Code, rec.Body.String())
+			}
+			if body := decodeError(t, rec); body.Code != "missing_auth_header" {
+				t.Errorf("code = %q, want missing_auth_header", body.Code)
+			}
+		})
+	}
+}
+
+func TestAdminAIActionsRequireAdminAuthentication(t *testing.T) {
+	router := NewRouter(Deps{Config: config.Config{DatabaseURL: "postgres://user:pw@localhost/db"}})
+	for _, path := range []string{
+		"/v1/admin/ai/logs",
+		"/v1/admin/ai/anomalies-scan",
+		"/v1/admin/ai/audit",
+		"/v1/admin/ai/ask",
+	} {
+		t.Run(path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`)))
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("POST %s = %d, want 401 from RequireAdmin; body: %s", path, rec.Code, rec.Body.String())
 			}
 			if body := decodeError(t, rec); body.Code != "missing_auth_header" {
 				t.Errorf("code = %q, want missing_auth_header", body.Code)
