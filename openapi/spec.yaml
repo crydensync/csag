@@ -2817,10 +2817,9 @@ paths:
         cryden has no scheduling concept: WeeklyDigest/DigestSince build a
         report on demand and return a string, with no run record. The
         table, the job that fills it and this endpoint are all this API's
-        own. DIGEST_INTERVAL_HOURS turns the schedule on; it is opt-in,
-        and the first run happens one full interval after startup rather
-        than at boot, so a process that restarts often does not write one
-        row per restart.
+        own. The admin setting controls a weekly day, local time, timezone,
+        recipients, and whether a host-provided sender delivers the report.
+        The first run is the next configured time, never at process startup.
       security: [{ bearerAuth: [] }]
       parameters:
         - name: limit
@@ -2851,13 +2850,72 @@ paths:
         '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: >
-            not_configured — no digest_runs store is wired, which is what
-            an unset DIGEST_INTERVAL_HOURS produces. Answered rather than
-            returned as an empty list, which an operator would read as
+            not_configured — no digest_runs store is wired. Answered rather
+            than returned as an empty list, which an operator would read as
             "no digest has ever been built".
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/settings/digest:
+    get:
+      summary: Read the weekly digest schedule and delivery availability
+      description: Admin only. Returns the persisted schedule and whether this API build has a host-provided digest sender. The standalone API does not ship an outbound email provider.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Current digest schedule
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [enabled, day_of_week, time, timezone, recipients, delivery_enabled, delivery_available]
+                    properties:
+                      enabled: { type: boolean }
+                      day_of_week: { type: string, enum: [sunday, monday, tuesday, wednesday, thursday, friday, saturday] }
+                      time: { type: string, pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$' }
+                      timezone: { type: string, description: IANA timezone name }
+                      recipients: { type: array, maxItems: 20, items: { type: string, format: email } }
+                      delivery_enabled: { type: boolean }
+                      delivery_available: { type: boolean, description: Whether this API build has a host-provided email sender }
+                      interval_hours: { type: integer, minimum: 1, maximum: 8760, description: Present only when using the legacy interval environment setting }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+    put:
+      summary: Save the weekly digest schedule and recipients
+      description: Admin only. Changes are persisted and picked up within one minute. Enabling delivery requires a host-provided sender; the standalone API rejects that setting rather than pretending to send.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled, day_of_week, time, timezone, recipients, delivery_enabled]
+              additionalProperties: false
+              properties:
+                enabled: { type: boolean }
+                day_of_week: { type: string, enum: [sunday, monday, tuesday, wednesday, thursday, friday, saturday] }
+                time: { type: string, pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$' }
+                timezone: { type: string, minLength: 1, maxLength: 64 }
+                recipients: { type: array, maxItems: 20, items: { type: string, format: email } }
+                delivery_enabled: { type: boolean }
+                interval_hours: { type: integer, minimum: 0, maximum: 8760, description: Set to zero or omit for weekly scheduling }
+      responses:
+        '200': { description: Saved digest schedule }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Digest delivery is enabled but no host sender is configured
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
 
   /admin/settings/password-policy:
     get:

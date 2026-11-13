@@ -243,6 +243,48 @@ func TestSchedulerRecordsNothingWhenTheStoreRejectsTheRun(t *testing.T) {
 	}
 }
 
+func TestSchedulerDeliversEachRunToConfiguredRecipients(t *testing.T) {
+	store := NewMemoryStore()
+	sender := &captureDigestSender{}
+	scheduler := &Scheduler{
+		Store:  store,
+		Sender: sender,
+		Build: func(context.Context) (Entry, error) {
+			return Entry{Text: "weekly security report"}, nil
+		},
+	}
+	scheduler.runOnceWithSettings(context.Background(), ScheduleSettings{
+		DeliveryEnabled: true,
+		Recipients:      []string{"security@example.com", "oncall@example.com"},
+	})
+
+	if len(sender.messages) != 2 {
+		t.Fatalf("sent %d messages, want one for each recipient", len(sender.messages))
+	}
+	for i, recipient := range []string{"security@example.com", "oncall@example.com"} {
+		message := sender.messages[i]
+		if message.to != recipient || message.subject != "Weekly security digest" || message.body != "weekly security report" {
+			t.Errorf("message %d = %+v, want recipient %q and the saved report", i, message, recipient)
+		}
+	}
+	if store.Count() != 1 {
+		t.Errorf("history contains %d runs, want the delivered run recorded", store.Count())
+	}
+}
+
+type capturedDigestMessage struct {
+	to      string
+	subject string
+	body    string
+}
+
+type captureDigestSender struct{ messages []capturedDigestMessage }
+
+func (s *captureDigestSender) SendDigest(_ context.Context, to, subject, body string) error {
+	s.messages = append(s.messages, capturedDigestMessage{to: to, subject: subject, body: body})
+	return nil
+}
+
 // waitForRuns blocks until the store holds at least n runs, failing the
 // test rather than hanging if the loop never gets there.
 func waitForRuns(t *testing.T, store *MemoryStore, n int) {

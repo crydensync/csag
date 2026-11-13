@@ -290,12 +290,13 @@ func serve() {
 	}
 
 	// Digest history: this repo's own table, written only by the scheduler
-	// below. Declared as the interface rather than as *digest.PostgresStore
+	// below. Constructed for every Postgres deployment so a schedule can
+	// be enabled at runtime. Declared as the interface rather than as *digest.PostgresStore
 	// for the same reason webhookStore is — a typed nil in a non-nil
 	// interface passes every nil check and then panics on use, and the
 	// router's handler guards on exactly that check.
 	var digestStore digest.Store
-	if cfg.DigestInterval > 0 && !cfg.UsesSQLite() {
+	if !cfg.UsesSQLite() {
 		digestStore = digest.NewStore(db)
 	}
 
@@ -324,6 +325,15 @@ func serve() {
 		if settingsSecrets.Configured() {
 			log.Printf("AI settings endpoints enabled (llm-provider, database-provider)")
 		}
+	}
+	digestScheduleFallback := digest.DefaultScheduleSettings()
+	if cfg.DigestInterval > 0 {
+		digestScheduleFallback.Enabled = true
+		digestScheduleFallback.IntervalHours = int(cfg.DigestInterval / time.Hour)
+	}
+	digestSchedule, err := digest.NewRuntime(context.Background(), settingsStore, digestScheduleFallback)
+	if err != nil {
+		log.Fatalf("digest schedule settings: %v", err)
 	}
 	activePasswordPolicy, err := passwordpolicy.NewManager(context.Background(), settingsStore, cfg.PasswordPolicy)
 	if err != nil {
@@ -598,9 +608,9 @@ func serve() {
 		log.Printf("webhook deliveries enabled: %d event types, up to %d attempts each", events, cfg.WebhookMaxAttempts)
 	}
 
-	// The digest schedule. Started only when DIGEST_INTERVAL_HOURS asked
-	// for one, so an unconfigured deployment runs no goroutine and writes
-	// no rows — the same shape as the webhook worker above.
+	// The digest scheduler runs on Postgres even while disabled, so an
+	// operator can change its schedule without restarting the API. A
+	// disabled schedule computes no reports and writes no rows.
 	//
 	// The builder closes over the engine rather than this package taking
 	// one: the report itself is cryden's (DigestSince), and digest's job is
@@ -614,9 +624,9 @@ func serve() {
 	// would be worse than no row.
 	if digestStore != nil {
 		scheduler := &digest.Scheduler{
-			Store:    digestStore,
-			Interval: cfg.DigestInterval,
-			Log:      log.Default(),
+			Store:            digestStore,
+			ScheduleProvider: digestSchedule.Snapshot,
+			Log:              log.Default(),
 			Build: func(ctx context.Context) (digest.Entry, error) {
 				since := time.Now().Add(-admin.DefaultDigestWindow)
 				text, err := cryden.DigestSince(ctx, engine, since)
@@ -631,7 +641,9 @@ func serve() {
 			},
 		}
 		workers.Go(func() { scheduler.Run(appCtx) })
-		log.Printf("scheduled digests enabled: one every %s", cfg.DigestInterval)
+		if schedule := digestSchedule.Snapshot(); schedule.Enabled {
+			log.Printf("scheduled digests enabled: %s at %s (%s)", schedule.DayOfWeek, schedule.Time, schedule.Timezone)
+		}
 	}
 
 	// Hoisted out of the Deps literal below because the teardown closes it:
@@ -662,7 +674,8 @@ func serve() {
 		Shipped:    shippedLog,
 		LogRuntime: loggingRuntime,
 
-		Digests: digestStore,
+		Digests:        digestStore,
+		DigestSchedule: digestSchedule,
 
 		// The loaded email templates, nil when EMAIL_TEMPLATE_DIR was not
 		// set (the senders then print their built-in lines). The template

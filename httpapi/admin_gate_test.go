@@ -32,6 +32,7 @@ var adminPaths = []string{
 	"/v1/admin/settings/llm-provider",
 	"/v1/admin/settings/database-provider",
 	"/v1/admin/settings/ask-ai-widget",
+	"/v1/admin/settings/digest",
 	"/v1/admin/email/stats",
 	"/v1/admin/settings/email-templates",
 }

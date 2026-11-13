@@ -14,6 +14,7 @@ import (
 	"github.com/crydensync/api/aiprovider"
 	"github.com/crydensync/api/anomalyreview"
 	"github.com/crydensync/api/askai"
+	"github.com/crydensync/api/digest"
 	"github.com/crydensync/api/settings"
 	"github.com/crydensync/api/usermeta"
 )
@@ -99,6 +100,8 @@ func mapError(err error) apiError {
 		return apiError{http.StatusTooManyRequests, "rate_limited", "too many requests, please slow down"}
 	case errors.Is(err, errAdminStoresUnavailable):
 		return apiError{http.StatusNotFound, "not_configured", "this report is not available on this deployment"}
+	case errors.Is(err, digest.ErrDeliveryUnavailable):
+		return apiError{http.StatusNotFound, "digest_delivery_not_configured", "digest email delivery is not configured on this deployment"}
 	case errors.Is(err, errOAuthProviderNotConfigured):
 		return apiError{http.StatusNotFound, "oauth_provider_not_configured", "this OAuth provider is not configured on this deployment"}
 	case errors.Is(err, errOAuthStateMismatch):

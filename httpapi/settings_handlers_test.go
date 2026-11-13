@@ -137,6 +137,8 @@ func TestSettingsRoutesAreGatedByRequireAdmin(t *testing.T) {
 		{http.MethodGet, widgetPath},
 		{http.MethodPut, widgetPath},
 		{http.MethodDelete, widgetPath},
+		{http.MethodGet, "/v1/admin/settings/digest"},
+		{http.MethodPut, "/v1/admin/settings/digest"},
 	}
 
 	for _, route := range routes {

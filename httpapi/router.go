@@ -82,15 +82,14 @@ type Deps struct {
 	// immediately in the engine's logger.
 	LogRuntime *shiplog.Runtime
 
-	// Digests backs GET /v1/admin/digest/history. Nil unless
-	// DIGEST_INTERVAL_HOURS asked for a schedule: the table is only ever
-	// written by the scheduler, so with no schedule there is no history to
-	// read, and the handler answers 404 rather than an empty list an
-	// operator would read as "nothing has ever happened".
+	// Digests backs GET /v1/admin/digest/history. Present on Postgres so a
+	// schedule can be enabled at runtime; on SQLite the admin gate returns 501.
 	//
 	// The on-demand GET /v1/admin/digest needs nothing from here — it
 	// reads the engine's audit history and records nothing.
-	Digests digest.Store
+	Digests        digest.Store
+	DigestSchedule *digest.Runtime
+	DigestSender   digest.DeliverySender
 
 	// Settings backs the /v1/admin/settings/* endpoints: the LLM provider
 	// and the read-only database behind the AI-assisted admin features.
@@ -156,6 +155,7 @@ func NewRouter(d Deps) http.Handler {
 	logging := &LoggingHandlers{Store: d.Shipped}
 	loggingSettings := &LoggingSettingsHandlers{Runtime: d.LogRuntime, Redaction: d.Config.CloudLogRedaction, HashKeySet: d.Config.CloudLogHashKey != ""}
 	digests := &DigestHandlers{Engine: engine, Store: d.Digests}
+	digestSettings := &DigestSettingsHandlers{Runtime: d.DigestSchedule, Sender: d.DigestSender}
 	support := &SupportHandlers{Engine: engine}
 	tuning := &TuningHandlers{Audit: d.Audit, Config: d.Config}
 	aiSettings := &SettingsHandlers{Secrets: d.Settings}
@@ -417,6 +417,8 @@ func NewRouter(d Deps) http.Handler {
 	// row there. Both are read-only; see DigestHandlers.
 	mux.HandleFunc("GET /v1/admin/digest", adminOnly(digests.Digest))
 	mux.HandleFunc("GET /v1/admin/digest/history", adminOnly(digests.DigestHistory))
+	mux.HandleFunc("GET /v1/admin/settings/digest", adminOnly(digestSettings.Read))
+	mux.HandleFunc("PUT /v1/admin/settings/digest", adminOnly(digestSettings.Save))
 
 	// The support-ticket assistant: "why can't this person log in",
 	// answered from the account's own recorded history. Read-only by
