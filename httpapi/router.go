@@ -167,7 +167,7 @@ func NewRouter(d Deps) http.Handler {
 	askAI := &WidgetHandlers{Service: d.AskAI}
 	widgetRateLimiter := NewWidgetUserRateLimiter(d.Config.AskAIRateLimit, d.Config.AskAIRateLimitWindow)
 	adminAI := &AdminAIHandlers{Service: d.AskAI, LogReader: d.Shipped, Audit: d.Audit}
-	operatorHandlers := &OperatorHandlers{Store: d.Operators, DB: d.DB, Config: d.Config, Users: d.Users, Passkeys: d.Passkeys, Sessions: d.Sessions, Audit: d.Audit}
+	operatorHandlers := &OperatorHandlers{Store: d.Operators, DB: d.DB, Engine: engine, Config: d.Config, Users: d.Users, Passkeys: d.Passkeys, Sessions: d.Sessions, Audit: d.Audit}
 	docs := NewDocsHandler()
 
 	// The gate for every route under /v1/admin, resolved once. On a
@@ -367,6 +367,21 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("POST /v1/admin/operators/step-up/finish", ownerOnly(operatorHandlers.FinishStepUp))
 	mux.HandleFunc("PUT /v1/admin/operators/{userID}", ownerOnly(func(w http.ResponseWriter, r *http.Request) { operatorHandlers.SetRole(w, r, r.PathValue("userID")) }))
 	mux.HandleFunc("DELETE /v1/admin/operators/{userID}", ownerOnly(func(w http.ResponseWriter, r *http.Request) { operatorHandlers.Remove(w, r, r.PathValue("userID")) }))
+	mux.HandleFunc("GET /v1/admin/operators/{userID}/sessions", ownerOnly(func(w http.ResponseWriter, r *http.Request) {
+		operatorHandlers.ListSessions(w, r, r.PathValue("userID"))
+	}))
+	mux.HandleFunc("DELETE /v1/admin/operators/{userID}/sessions", ownerOnly(func(w http.ResponseWriter, r *http.Request) {
+		operatorHandlers.RevokeAllSessions(w, r, r.PathValue("userID"))
+	}))
+	mux.HandleFunc("DELETE /v1/admin/operators/{userID}/sessions/{sessionID}", ownerOnly(func(w http.ResponseWriter, r *http.Request) {
+		operatorHandlers.RevokeSession(w, r, r.PathValue("userID"), r.PathValue("sessionID"))
+	}))
+	mux.HandleFunc("GET /v1/admin/operators/{userID}/passkeys", ownerOnly(func(w http.ResponseWriter, r *http.Request) {
+		operatorHandlers.ListPasskeys(w, r, r.PathValue("userID"))
+	}))
+	mux.HandleFunc("DELETE /v1/admin/operators/{userID}/passkeys/{credentialID}", ownerOnly(func(w http.ResponseWriter, r *http.Request) {
+		operatorHandlers.RemovePasskey(w, r, r.PathValue("userID"), r.PathValue("credentialID"))
+	}))
 
 	// The account actions. Every one changes an account that is not the
 	// operator's, which is what kept this surface unwritten until the

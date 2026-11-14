@@ -935,6 +935,11 @@ components:
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ErrorResponse' }
+    NotFound:
+      description: The requested resource does not exist
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
     NotImplementedOnSQLite:
       description: >
         not_implemented_on_sqlite — this deployment runs on SQLite, so
@@ -1588,7 +1593,7 @@ paths:
               type: object
               required: [purpose]
               properties:
-                purpose: { type: string, enum: [operator_role_change, operator_remove] }
+                purpose: { type: string, enum: [operator_role_change, operator_remove, operator_session_revoke, operator_passkey_remove] }
       responses:
         '200': { description: Passkey request options and opaque ceremony token }
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -1607,7 +1612,7 @@ paths:
               type: object
               required: [purpose, ceremony_token, credential]
               properties:
-                purpose: { type: string, enum: [operator_role_change, operator_remove] }
+                purpose: { type: string, enum: [operator_role_change, operator_remove, operator_session_revoke, operator_passkey_remove] }
                 ceremony_token: { type: string }
                 credential: { type: object, additionalProperties: true }
       responses:
@@ -1652,6 +1657,76 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409': { description: Last owner protection }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+  /admin/operators/{userID}/sessions:
+    get:
+      summary: Active sessions for one operator
+      description: Owner only. Returns sanitized active session metadata; token hashes and family identifiers are never included.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: userID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, maximum: 10000, default: 0 } }
+      responses:
+        '200': { description: Active sessions for the operator }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+    delete:
+      summary: Revoke all active sessions for one operator
+      description: Owner only. Requires a fresh grant for operator_session_revoke and records an audit event.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: userID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: X-CSAG-Operator-Grant, in: header, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Sessions revoked; returns the count }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+  /admin/operators/{userID}/sessions/{sessionID}:
+    delete:
+      summary: Revoke one operator session
+      description: Owner only. Requires a fresh grant for operator_session_revoke; session ownership is checked by CSAG.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: userID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: sessionID, in: path, required: true, schema: { type: string } }
+        - { name: X-CSAG-Operator-Grant, in: header, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Session revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+  /admin/operators/{userID}/passkeys:
+    get:
+      summary: Passkeys registered to one operator
+      description: Owner only. Returns credential IDs, labels and timestamps, never public keys or credential data.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: userID, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Passkey metadata }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+  /admin/operators/{userID}/passkeys/{credentialID}:
+    delete:
+      summary: Remove one operator passkey
+      description: Owner only. Requires a fresh grant for operator_passkey_remove. The target must retain at least one passkey.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: userID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: credentialID, in: path, required: true, schema: { type: string } }
+        - { name: X-CSAG-Operator-Grant, in: header, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Passkey removed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: The target has only one passkey }
         '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
   /admin/sessions:
     get:

@@ -101,6 +101,8 @@ func mapError(err error) apiError {
 		return apiError{http.StatusForbidden, "step_up_required", "fresh verified passkey authentication is required for this operator action"}
 	case errors.Is(err, operator.ErrLastOwner):
 		return apiError{http.StatusConflict, "last_owner", "the last owner cannot be demoted or removed"}
+	case errors.Is(err, errLastOperatorPasskey):
+		return apiError{http.StatusConflict, "last_passkey", "the last passkey cannot be removed"}
 	case errors.Is(err, operator.ErrInvalidRole):
 		return apiError{http.StatusBadRequest, "invalid_operator_role", "role must be owner, admin, or viewer"}
 	case errors.Is(err, operator.ErrNotFound):

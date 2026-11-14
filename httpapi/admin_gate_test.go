@@ -130,6 +130,11 @@ func TestOperatorMutationRoutesRequireAuthentication(t *testing.T) {
 		{http.MethodPost, "/v1/admin/operators/step-up/finish"},
 		{http.MethodPut, "/v1/admin/operators/01a1d782-0635-7e41-bd60-50e1cfef5fc8"},
 		{http.MethodDelete, "/v1/admin/operators/01a1d782-0635-7e41-bd60-50e1cfef5fc8"},
+		{http.MethodGet, "/v1/admin/operators/01a1d782-0635-7e41-bd60-50e1cfef5fc8/sessions"},
+		{http.MethodDelete, "/v1/admin/operators/01a1d782-0635-7e41-bd60-50e1cfef5fc8/sessions"},
+		{http.MethodDelete, "/v1/admin/operators/01a1d782-0635-7e41-bd60-50e1cfef5fc8/sessions/01a1d782-0635-7e41-bd60-50e1cfef5fc8"},
+		{http.MethodGet, "/v1/admin/operators/01a1d782-0635-7e41-bd60-50e1cfef5fc8/passkeys"},
+		{http.MethodDelete, "/v1/admin/operators/01a1d782-0635-7e41-bd60-50e1cfef5fc8/passkeys/YWJj"},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			rec := httptest.NewRecorder()
