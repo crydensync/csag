@@ -35,6 +35,9 @@ import (
 // endpoint that reports on it.
 type Deps struct {
 	Engine *cryden.Engine
+	// MigrationNames are this binary's embedded Postgres up-migration names,
+	// in apply order. SystemStatus compares them with schema_migrations.
+	MigrationNames []string
 
 	// DB is used only by the health handler, which pings it. Nil is fine
 	// for a router built without a database (tests); /v1/health then
@@ -168,6 +171,7 @@ func NewRouter(d Deps) http.Handler {
 	widgetRateLimiter := NewWidgetUserRateLimiter(d.Config.AskAIRateLimit, d.Config.AskAIRateLimitWindow)
 	adminAI := &AdminAIHandlers{Service: d.AskAI, LogReader: d.Shipped, Audit: d.Audit}
 	operatorHandlers := &OperatorHandlers{Store: d.Operators, DB: d.DB, Engine: engine, Config: d.Config, Users: d.Users, Passkeys: d.Passkeys, Sessions: d.Sessions, Audit: d.Audit}
+	system := &SystemHandlers{DB: d.DB, MigrationNames: d.MigrationNames}
 	docs := NewDocsHandler()
 
 	// The gate for every route under /v1/admin, resolved once. On a
@@ -335,6 +339,9 @@ func NewRouter(d Deps) http.Handler {
 		oauthHealth.TestProvider(w, r, r.PathValue("provider"))
 	}))
 	mux.HandleFunc("GET /v1/admin/security/hash-migration", adminOnly(security.HashMigration))
+	mux.HandleFunc("GET /v1/admin/stats", adminOnly(system.Stats))
+	mux.HandleFunc("GET /v1/admin/doctor", adminOnly(system.Doctor))
+	mux.HandleFunc("GET /v1/admin/migrations/status", adminOnly(system.Migrations))
 	// Second-factor enrolment, as the engine's own audit events against the
 	// user total. Reports events rather than users, and says so — cryden
 	// has no count of accounts with a factor enrolled, and getting one from

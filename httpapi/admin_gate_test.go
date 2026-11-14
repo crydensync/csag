@@ -126,6 +126,9 @@ func TestAdminAIActionsRequireAdminAuthentication(t *testing.T) {
 func TestOperatorMutationRoutesRequireAuthentication(t *testing.T) {
 	router := NewRouter(Deps{Config: config.Config{DatabaseURL: "postgres://user:pw@localhost/db"}})
 	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/v1/admin/stats"},
+		{http.MethodGet, "/v1/admin/doctor"},
+		{http.MethodGet, "/v1/admin/migrations/status"},
 		{http.MethodPost, "/v1/admin/operators/step-up/begin"},
 		{http.MethodPost, "/v1/admin/operators/step-up/finish"},
 		{http.MethodPost, "/v1/admin/operators/step-up/consume"},

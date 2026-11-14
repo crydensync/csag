@@ -1569,6 +1569,95 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
 
+  /admin/stats:
+    get:
+      summary: Aggregate authentication statistics
+      description: Admin only. Returns aggregate counts without per-user records or database configuration values.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Aggregate counts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [users, active_sessions, operators, active_api_keys]
+                    properties:
+                      users: { type: integer, minimum: 0 }
+                      active_sessions: { type: integer, minimum: 0 }
+                      operators: { type: integer, minimum: 0 }
+                      active_api_keys: { type: integer, minimum: 0 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/doctor:
+    get:
+      summary: Read-only deployment diagnostics
+      description: Admin only. Checks database reachability and whether migration records match this API build. Diagnostic details never include driver errors or configuration values.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Diagnostic status, including degraded checks
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [status, checked_at, checks]
+                    properties:
+                      status: { type: string, enum: [healthy, degraded] }
+                      checked_at: { type: string, format: date-time }
+                      checks:
+                        type: array
+                        items:
+                          type: object
+                          required: [name, status, detail]
+                          properties:
+                            name: { type: string, enum: [database, migrations] }
+                            status: { type: string, enum: [healthy, attention, failed, unknown] }
+                            detail: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/migrations/status:
+    get:
+      summary: Authentication database migration status
+      description: Admin only. Compares the schema_migrations records in the authentication schema with the ordered migrations embedded in this API build.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Applied, pending, and unknown migration names
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [applied, pending, unknown]
+                    properties:
+                      current: { type: string, nullable: true }
+                      applied:
+                        type: array
+                        items:
+                          type: object
+                          required: [name, applied_at]
+                          properties:
+                            name: { type: string }
+                            applied_at: { type: string }
+                      pending: { type: array, items: { type: string } }
+                      unknown: { type: array, items: { type: string } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
   /admin/operators:
     get:
       summary: Current console operator roster

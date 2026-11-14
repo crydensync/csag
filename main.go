@@ -663,18 +663,23 @@ func serve() {
 	// read-only one behind the AI query surface), and nothing else would
 	// release it. See Service.Close.
 	askAI := askai.New(settingsSecrets)
+	migrationNames, err := embeddedMigrationNames()
+	if err != nil {
+		log.Fatalf("reading embedded migration names: %v", err)
+	}
 
 	router := httpapi.NewRouter(httpapi.Deps{
-		Engine:      engine,
-		Operators:   st.operators,
-		DB:          db,
-		Config:      cfg,
-		Audit:       audit,
-		Users:       users,
-		Passkeys:    st.webauthn,
-		Meta:        metadata,
-		Hooks:       webhookStore,
-		WebhookWake: webhookWake,
+		Engine:         engine,
+		MigrationNames: migrationNames,
+		Operators:      st.operators,
+		DB:             db,
+		Config:         cfg,
+		Audit:          audit,
+		Users:          users,
+		Passkeys:       st.webauthn,
+		Meta:           metadata,
+		Hooks:          webhookStore,
+		WebhookWake:    webhookWake,
 
 		Sessions: sessions,
 

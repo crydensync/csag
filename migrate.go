@@ -37,6 +37,17 @@ var postgresMigrations embed.FS
 // above. Named once because the test FS has to mirror it.
 const postgresMigrationDir = "migrations"
 
+// embeddedMigrationNames is the ordered schema version set this binary can
+// apply. System status uses the same source as the migration runner rather
+// than maintaining a second hand-written version list.
+func embeddedMigrationNames() ([]string, error) {
+	sub, err := fs.Sub(postgresMigrations, postgresMigrationDir)
+	if err != nil {
+		return nil, fmt.Errorf("reading embedded migrations: %w", err)
+	}
+	return upMigrationNames(sub)
+}
+
 // migrationTable is the Postgres tracking table: one row per applied file.
 //
 // This table is created in crydensync_auth because PostgreSQL connections
