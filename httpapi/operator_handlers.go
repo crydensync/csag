@@ -98,6 +98,9 @@ func (h *OperatorHandlers) BeginStepUp(w http.ResponseWriter, r *http.Request) {
 		writeBadRequest(w, "a valid operator step-up purpose is required")
 		return
 	}
+	if !h.authorizeStepUpPurpose(w, r, req.Purpose) {
+		return
+	}
 	userID := r.Context().Value(userIDContextKey).(string)
 	_, _ = h.DB.ExecContext(r.Context(), `DELETE FROM operator_stepup_challenges WHERE expires_at <= now()`)
 	_, _ = h.DB.ExecContext(r.Context(), `DELETE FROM operator_stepup_grants WHERE expires_at <= now()`)
@@ -153,6 +156,9 @@ func (h *OperatorHandlers) FinishStepUp(w http.ResponseWriter, r *http.Request) 
 	var req finishStepUpRequest
 	if json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&req) != nil || !validStepUpPurpose(req.Purpose) || len(req.CeremonyToken) < 32 || len(req.Credential) == 0 {
 		writeBadRequest(w, "invalid operator step-up response")
+		return
+	}
+	if !h.authorizeStepUpPurpose(w, r, req.Purpose) {
 		return
 	}
 	userID := r.Context().Value(userIDContextKey).(string)
@@ -215,11 +221,51 @@ func (h *OperatorHandlers) FinishStepUp(w http.ResponseWriter, r *http.Request) 
 
 func validStepUpPurpose(s string) bool {
 	switch s {
-	case "operator_role_change", "operator_remove", "operator_session_revoke", "operator_passkey_remove":
+	case "operator_role_change", "operator_remove", "operator_session_revoke", "operator_passkey_remove", "secret_reveal", "secret_mutation":
 		return true
 	default:
 		return false
 	}
+}
+
+func (h *OperatorHandlers) authorizeStepUpPurpose(w http.ResponseWriter, r *http.Request, purpose string) bool {
+	if strings.HasPrefix(purpose, "secret_") {
+		return true // adminOnly already authenticated this operator
+	}
+	if h.Store == nil {
+		writeErr(w, errAdminStoresUnavailable)
+		return false
+	}
+	userID := UserIDFromContext(r)
+	items, err := h.Store.List(r.Context())
+	if err != nil {
+		writeErr(w, err)
+		return false
+	}
+	for _, item := range items {
+		if item.UserID == userID {
+			if item.Role == "owner" {
+				return true
+			}
+			writeErr(w, errNotOwner)
+			return false
+		}
+	}
+	writeErr(w, errNotOwner)
+	return false
+}
+
+func (h *OperatorHandlers) ConsumeStepUp(w http.ResponseWriter, r *http.Request) {
+	var req beginStepUpRequest
+	if json.NewDecoder(io.LimitReader(r.Body, 16<<10)).Decode(&req) != nil || (req.Purpose != "secret_reveal" && req.Purpose != "secret_mutation") {
+		writeBadRequest(w, "a valid secret step-up purpose is required")
+		return
+	}
+	if err := h.consumeGrant(r, req.Purpose); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeData(w, http.StatusOK, map[string]bool{"consumed": true})
 }
 func randomStepUpToken() (string, error) {
 	b := make([]byte, 32)

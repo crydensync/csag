@@ -128,6 +128,7 @@ func TestOperatorMutationRoutesRequireAuthentication(t *testing.T) {
 	for _, tc := range []struct{ method, path string }{
 		{http.MethodPost, "/v1/admin/operators/step-up/begin"},
 		{http.MethodPost, "/v1/admin/operators/step-up/finish"},
+		{http.MethodPost, "/v1/admin/operators/step-up/consume"},
 		{http.MethodPut, "/v1/admin/operators/01a1d782-0635-7e41-bd60-50e1cfef5fc8"},
 		{http.MethodDelete, "/v1/admin/operators/01a1d782-0635-7e41-bd60-50e1cfef5fc8"},
 		{http.MethodGet, "/v1/admin/operators/01a1d782-0635-7e41-bd60-50e1cfef5fc8/sessions"},

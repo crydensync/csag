@@ -1582,8 +1582,8 @@ paths:
         '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
   /admin/operators/step-up/begin:
     post:
-      summary: Begin owner WebAuthn step-up
-      description: Owner only. Creates a 60-second, single-use challenge tied to this access token and action purpose. User verification is required.
+      summary: Begin WebAuthn step-up
+      description: Admin for secret purposes and owner for operator-management purposes. Creates a 60-second single-use challenge tied to this access token and purpose. User verification is required.
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -1593,7 +1593,7 @@ paths:
               type: object
               required: [purpose]
               properties:
-                purpose: { type: string, enum: [operator_role_change, operator_remove, operator_session_revoke, operator_passkey_remove] }
+                purpose: { type: string, enum: [operator_role_change, operator_remove, operator_session_revoke, operator_passkey_remove, secret_reveal, secret_mutation] }
       responses:
         '200': { description: Passkey request options and opaque ceremony token }
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -1601,8 +1601,8 @@ paths:
         '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
   /admin/operators/step-up/finish:
     post:
-      summary: Verify owner WebAuthn step-up
-      description: Owner only. Verifies an assertion with user verification and returns a one-use grant bound to the exact access token and purpose. The grant expires after 20 seconds.
+      summary: Verify WebAuthn step-up
+      description: Admin for secret purposes and owner for operator-management purposes. Verifies user presence and returns a one-use grant bound to the exact access token and purpose. The grant expires after 20 seconds.
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -1612,11 +1612,33 @@ paths:
               type: object
               required: [purpose, ceremony_token, credential]
               properties:
-                purpose: { type: string, enum: [operator_role_change, operator_remove, operator_session_revoke, operator_passkey_remove] }
+                purpose: { type: string, enum: [operator_role_change, operator_remove, operator_session_revoke, operator_passkey_remove, secret_reveal, secret_mutation] }
                 ceremony_token: { type: string }
                 credential: { type: object, additionalProperties: true }
       responses:
         '200': { description: Verified one-use grant }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+  /admin/operators/step-up/consume:
+    post:
+      summary: Consume a one-use secret step-up grant
+      description: Admin only. Consumes a fresh grant for one local console secret action; the API never receives or returns secret values.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: X-CSAG-Operator-Grant, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [purpose]
+              properties:
+                purpose: { type: string, enum: [secret_reveal, secret_mutation] }
+      responses:
+        '200': { description: Grant consumed }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
