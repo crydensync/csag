@@ -1603,7 +1603,7 @@ paths:
   /admin/operators/step-up/begin:
     post:
       summary: Begin WebAuthn step-up
-      description: Admin for secret purposes and owner for operator-management purposes. Creates a 60-second single-use challenge tied to this access token and purpose. User verification is required.
+      description: Admin for secret purposes and owner for operator-management purposes. Creates a 60-second single-use challenge tied to this access token and purpose. User verification is required. Five failed confirmations in a 15-minute window lock further step-up attempts for 15 minutes.
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -1618,11 +1618,12 @@ paths:
         '200': { description: Passkey request options and opaque ceremony token }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { description: Step-up is locked after repeated failed passkey confirmations }
         '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
   /admin/operators/step-up/finish:
     post:
       summary: Verify WebAuthn step-up
-      description: Admin for secret purposes and owner for operator-management purposes. Verifies user presence and returns a one-use grant bound to the exact access token and purpose. The grant expires after 20 seconds.
+      description: Admin for secret purposes and owner for operator-management purposes. Verifies user presence and returns a one-use grant bound to the exact access token and purpose. The grant expires after 20 seconds. Five failed confirmations in a 15-minute window lock further step-up attempts for 15 minutes; a successful confirmation clears the failure count.
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -1640,6 +1641,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { description: Step-up is locked after repeated failed passkey confirmations }
         '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
   /admin/operators/step-up/consume:
     post:

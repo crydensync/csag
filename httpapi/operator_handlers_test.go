@@ -90,3 +90,34 @@ func TestStepUpPurposeSeparatesOwnerActionsFromAdminSecrets(t *testing.T) {
 		t.Fatalf("admin was refused a secret step-up: %s", secretAction.Body.String())
 	}
 }
+
+func TestStepUpFailureWindowLocksAfterFiveFailures(t *testing.T) {
+	now := time.Date(2026, time.November, 14, 12, 0, 0, 0, time.UTC)
+	started := now.Add(-time.Minute)
+	count, windowStart, lockedUntil := nextStepUpFailure(4, started, now)
+	if count != stepUpFailureLimit {
+		t.Fatalf("failure count = %d, want %d", count, stepUpFailureLimit)
+	}
+	if !windowStart.Equal(started) {
+		t.Fatalf("window start = %s, want %s", windowStart, started)
+	}
+	if !lockedUntil.Valid || !lockedUntil.Time.Equal(now.Add(stepUpLockDuration)) {
+		t.Fatalf("lockout = %+v, want lock until %s", lockedUntil, now.Add(stepUpLockDuration))
+	}
+}
+
+func TestStepUpFailureWindowResetsAfterFifteenMinutes(t *testing.T) {
+	started := time.Date(2026, time.November, 14, 12, 0, 0, 0, time.UTC)
+	now := started.Add(stepUpFailureWindow)
+	count, windowStart, lockedUntil := nextStepUpFailure(stepUpFailureLimit, started, now)
+	if count != 1 || !windowStart.Equal(now) || lockedUntil.Valid {
+		t.Fatalf("expired failure window = count %d, start %s, lock %+v", count, windowStart, lockedUntil)
+	}
+}
+
+func TestStepUpLockoutMapsToRateLimit(t *testing.T) {
+	mapped := mapError(errStepUpLocked)
+	if mapped.Status != http.StatusTooManyRequests || mapped.Code != "step_up_locked" {
+		t.Fatalf("mapped lockout = %+v, want 429 step_up_locked", mapped)
+	}
+}

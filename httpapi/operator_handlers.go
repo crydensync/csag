@@ -28,6 +28,12 @@ import (
 var errStepUpRequired = errors.New("fresh WebAuthn step-up required")
 var errLastOperatorPasskey = errors.New("the last operator passkey cannot be removed")
 
+const (
+	stepUpFailureLimit  = 5
+	stepUpFailureWindow = 15 * time.Minute
+	stepUpLockDuration  = 15 * time.Minute
+)
+
 type OperatorHandlers struct {
 	Store interface {
 		List(context.Context) ([]operator.Operator, error)
@@ -102,6 +108,10 @@ func (h *OperatorHandlers) BeginStepUp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := r.Context().Value(userIDContextKey).(string)
+	if err := h.checkStepUpLockout(r.Context(), userID); err != nil {
+		writeErr(w, err)
+		return
+	}
 	_, _ = h.DB.ExecContext(r.Context(), `DELETE FROM operator_stepup_challenges WHERE expires_at <= now()`)
 	_, _ = h.DB.ExecContext(r.Context(), `DELETE FROM operator_stepup_grants WHERE expires_at <= now()`)
 	user, err := h.user(r.Context(), userID)
@@ -162,6 +172,10 @@ func (h *OperatorHandlers) FinishStepUp(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	userID := r.Context().Value(userIDContextKey).(string)
+	if err := h.checkStepUpLockout(r.Context(), userID); err != nil {
+		writeErr(w, err)
+		return
+	}
 	accessHash := sha256.Sum256([]byte(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")))
 	var state []byte
 	err := h.DB.QueryRowContext(r.Context(), `DELETE FROM operator_stepup_challenges WHERE token_hash=$1 AND user_id=$2 AND access_token_hash=$3 AND purpose=$4 AND expires_at>now() RETURNING session_data`, hashStepUp(req.CeremonyToken), userID, accessHash[:], req.Purpose).Scan(&state)
@@ -190,12 +204,12 @@ func (h *OperatorHandlers) FinishStepUp(w http.ResponseWriter, r *http.Request) 
 	}
 	parsed, err := protocol.ParseCredentialRequestResponseBytes(req.Credential)
 	if err != nil || parsed == nil || !parsed.Response.AuthenticatorData.Flags.HasUserVerified() {
-		writeErr(w, errStepUpRequired)
+		h.rejectStepUp(w, r, userID)
 		return
 	}
 	credential, err := wa.ValidateLogin(user, session, parsed)
 	if err != nil || credential == nil || !credential.Flags.UserVerified {
-		writeErr(w, errStepUpRequired)
+		h.rejectStepUp(w, r, userID)
 		return
 	}
 	credentialData, err := json.Marshal(credential)
@@ -216,7 +230,86 @@ func (h *OperatorHandlers) FinishStepUp(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, err)
 		return
 	}
+	if _, err = h.DB.ExecContext(r.Context(), `DELETE FROM operator_stepup_lockouts WHERE user_id=$1`, userID); err != nil {
+		writeErr(w, err)
+		return
+	}
 	writeData(w, http.StatusOK, map[string]string{"grant": grant})
+}
+
+func (h *OperatorHandlers) checkStepUpLockout(ctx context.Context, userID string) error {
+	if h.DB == nil {
+		return errStepUpRequired
+	}
+	var lockedUntil sql.NullTime
+	err := h.DB.QueryRowContext(ctx, `SELECT locked_until FROM operator_stepup_lockouts WHERE user_id=$1`, userID).Scan(&lockedUntil)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if lockedUntil.Valid && time.Now().Before(lockedUntil.Time) {
+		return errStepUpLocked
+	}
+	return nil
+}
+
+func (h *OperatorHandlers) rejectStepUp(w http.ResponseWriter, r *http.Request, userID string) {
+	if err := h.recordStepUpFailure(r.Context(), userID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeErr(w, errStepUpRequired)
+}
+
+func (h *OperatorHandlers) recordStepUpFailure(ctx context.Context, userID string) error {
+	if h.DB == nil {
+		return errStepUpRequired
+	}
+	tx, err := h.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC()
+	if _, err = tx.ExecContext(ctx, `INSERT INTO operator_stepup_lockouts (user_id, failure_count, window_started_at, locked_until, updated_at) VALUES ($1,0,$2,NULL,$2) ON CONFLICT (user_id) DO NOTHING`, userID, now); err != nil {
+		return err
+	}
+	var count int
+	var windowStarted time.Time
+	var lockedUntil sql.NullTime
+	if err = tx.QueryRowContext(ctx, `SELECT failure_count, window_started_at, locked_until FROM operator_stepup_lockouts WHERE user_id=$1 FOR UPDATE`, userID).Scan(&count, &windowStarted, &lockedUntil); err != nil {
+		return err
+	}
+	count, windowStarted, lockedUntil = nextStepUpFailure(count, windowStarted, now)
+	var lockedValue any
+	if lockedUntil.Valid {
+		lockedValue = lockedUntil.Time
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE operator_stepup_lockouts SET failure_count=$2, window_started_at=$3, locked_until=$4, updated_at=$5 WHERE user_id=$1`, userID, count, windowStarted, lockedValue, now); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	if lockedUntil.Valid {
+		return errStepUpLocked
+	}
+	return nil
+}
+
+func nextStepUpFailure(count int, windowStarted time.Time, now time.Time) (int, time.Time, sql.NullTime) {
+	if windowStarted.IsZero() || !now.Before(windowStarted.Add(stepUpFailureWindow)) {
+		count = 0
+		windowStarted = now
+	}
+	count++
+	var lockedUntil sql.NullTime
+	if count >= stepUpFailureLimit {
+		lockedUntil = sql.NullTime{Time: now.Add(stepUpLockDuration), Valid: true}
+	}
+	return count, windowStarted, lockedUntil
 }
 
 func validStepUpPurpose(s string) bool {

@@ -363,15 +363,15 @@ func TestTier7TheEmbeddedPostgresMigrationsArePresent(t *testing.T) {
 		t.Fatalf("upMigrationNames: %v", err)
 	}
 
-	if len(names) != 15 {
-		t.Errorf("embedded %d up-migrations, want 15: %v", len(names), names)
+	if len(names) != 16 {
+		t.Errorf("embedded %d up-migrations, want 16: %v", len(names), names)
 	}
 	if names[0] != "001_initial_schema.up.sql" {
 		t.Errorf("first embedded migration is %q", names[0])
 	}
-	// The last one is host-owned (015_operator_stepup), so this also
+	// The last one is host-owned (016_operator_stepup_lockouts), so this also
 	// pins that the embed is not somehow picking up cryden's numbering.
-	if last := names[len(names)-1]; last != "015_operator_stepup.up.sql" {
+	if last := names[len(names)-1]; last != "016_operator_stepup_lockouts.up.sql" {
 		t.Errorf("last embedded migration is %q", last)
 	}
 

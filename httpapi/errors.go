@@ -45,6 +45,7 @@ var errMissingAuthHeader = errors.New("missing or malformed Authorization header
 // on purpose (see operator/store.go and RequireAdmin).
 var errNotOperator = errors.New("this account does not have console operator access")
 var errNotOwner = errors.New("only owners can manage operators")
+var errStepUpLocked = errors.New("operator step-up is temporarily locked")
 
 // errNotImplementedOnSQLite is returned for every admin route on a
 // SQLite deployment, before the token is even looked at.
@@ -99,6 +100,8 @@ func mapError(err error) apiError {
 		return apiError{http.StatusForbidden, "owner_required", "only owners can change operator access"}
 	case errors.Is(err, errStepUpRequired):
 		return apiError{http.StatusForbidden, "step_up_required", "fresh verified passkey authentication is required for this operator action"}
+	case errors.Is(err, errStepUpLocked):
+		return apiError{http.StatusTooManyRequests, "step_up_locked", "too many failed passkey confirmations; operator step-up is locked for 15 minutes"}
 	case errors.Is(err, operator.ErrLastOwner):
 		return apiError{http.StatusConflict, "last_owner", "the last owner cannot be demoted or removed"}
 	case errors.Is(err, errLastOperatorPasskey):

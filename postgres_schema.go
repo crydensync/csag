@@ -35,6 +35,7 @@ var postgresAuthTables = []string{
 	"reviewed_anomalies",
 	"operator_stepup_challenges",
 	"operator_stepup_grants",
+	"operator_stepup_lockouts",
 }
 
 // preparePostgresSchema creates the private namespace and moves a known
