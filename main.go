@@ -654,6 +654,7 @@ func serve() {
 
 	router := httpapi.NewRouter(httpapi.Deps{
 		Engine:      engine,
+		Operators:   st.operators,
 		DB:          db,
 		Config:      cfg,
 		Audit:       audit,

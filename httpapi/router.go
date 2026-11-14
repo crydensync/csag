@@ -12,6 +12,7 @@ import (
 	"github.com/crydensync/api/config"
 	"github.com/crydensync/api/digest"
 	"github.com/crydensync/api/jwtclaims"
+	"github.com/crydensync/api/operator"
 	"github.com/crydensync/api/passwordpolicy"
 	"github.com/crydensync/api/settings"
 	"github.com/crydensync/api/shiplog"
@@ -38,8 +39,9 @@ type Deps struct {
 	// DB is used only by the health handler, which pings it. Nil is fine
 	// for a router built without a database (tests); /v1/health then
 	// reports the database as unconfigured rather than panicking.
-	DB     *sql.DB
-	Config config.Config
+	DB        *sql.DB
+	Config    config.Config
+	Operators *operator.Store
 
 	// Audit and Users back GET /v1/admin/security/hash-migration — cryden
 	// exposes no bulk way to inspect stored password hashes, so the
@@ -164,6 +166,7 @@ func NewRouter(d Deps) http.Handler {
 	askAI := &WidgetHandlers{Service: d.AskAI}
 	widgetRateLimiter := NewWidgetUserRateLimiter(d.Config.AskAIRateLimit, d.Config.AskAIRateLimitWindow)
 	adminAI := &AdminAIHandlers{Service: d.AskAI, LogReader: d.Shipped, Audit: d.Audit}
+	operatorHandlers := &OperatorHandlers{Store: d.Operators}
 	docs := NewDocsHandler()
 
 	// The gate for every route under /v1/admin, resolved once. On a
@@ -173,7 +176,7 @@ func NewRouter(d Deps) http.Handler {
 	// it is what makes "the whole admin console needs DATABASE_URL" a
 	// property of the router rather than a list to keep in sync. See
 	// AdminOnly.
-	adminOnly := AdminOnly(engine, d.Config)
+	adminOnly := AdminOnly(engine, d.Config, d.Operators)
 
 	mux := http.NewServeMux()
 
@@ -339,6 +342,7 @@ func NewRouter(d Deps) http.Handler {
 	}))
 	mux.HandleFunc("POST /v1/admin/sessions/revoke-all", adminOnly(adminSessions.RevokeAll))
 	mux.HandleFunc("GET /v1/admin/audit", adminOnly(auditLog.List))
+	mux.HandleFunc("GET /v1/admin/operators", adminOnly(operatorHandlers.List))
 
 	// The account actions. Every one changes an account that is not the
 	// operator's, which is what kept this surface unwritten until the

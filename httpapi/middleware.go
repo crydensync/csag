@@ -9,6 +9,7 @@ import (
 	"github.com/crydensync/cryden/v2"
 
 	"github.com/crydensync/api/config"
+	"github.com/crydensync/api/operator"
 )
 
 type contextKey string
@@ -63,18 +64,21 @@ func UserIDFromContext(r *http.Request) string {
 }
 
 // RequireAdmin verifies the Bearer access token exactly like
-// RequireAuth, and additionally requires its "role" claim to be
-// "admin". That claim is set by main.go's AccessTokenClaims provider,
-// backed by operator.Store — an ordinary end user's token carries no
-// role claim at all, so an unknown user, a revoked operator, and
-// someone who was simply never an operator all fail identically here.
+// RequireAuth, and additionally requires an active "admin" or "owner"
+// role in operator.Store. The token claim is checked as a fallback for
+// routers constructed without a Store in tests; the running server checks
+// the live row so a role change or revocation takes effect immediately.
+// An ordinary end user's token carries no role claim, so an unknown user,
+// a revoked operator, and someone who was never an operator fail alike.
 // There is deliberately no separate "not an operator, but otherwise
 // valid" response — that distinction is not the caller's to learn.
 //
 // The router must not call this directly for an admin route; it goes
 // through AdminOnly, which is this on a Postgres deployment and a flat
 // 501 on a SQLite one. See AdminOnly.
-func RequireAdmin(engine *cryden.Engine, next http.HandlerFunc) http.HandlerFunc {
+func RequireAdmin(engine *cryden.Engine, operators interface {
+	RoleFor(context.Context, string) (string, bool, error)
+}, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		if !strings.HasPrefix(authHeader, "Bearer ") {
@@ -88,7 +92,20 @@ func RequireAdmin(engine *cryden.Engine, next http.HandlerFunc) http.HandlerFunc
 			writeErr(w, err)
 			return
 		}
-		if role, _ := claims["role"].(string); role != "admin" {
+		role, _ := claims["role"].(string)
+		if operators != nil {
+			currentRole, active, roleErr := operators.RoleFor(r.Context(), userID)
+			if roleErr != nil {
+				writeErr(w, roleErr)
+				return
+			}
+			if !active {
+				writeErr(w, errNotOperator)
+				return
+			}
+			role = currentRole
+		}
+		if role != "admin" && role != "owner" {
 			writeErr(w, errNotOperator)
 			return
 		}
@@ -142,7 +159,7 @@ func WithCORS(allowedOrigins []string, next http.Handler) http.Handler {
 // inherits the answer, and there is no second list to keep in sync.
 // Every admin route in the router goes through the value this returns —
 // which is why RequireAdmin's own doc says not to call it directly.
-func AdminOnly(engine *cryden.Engine, cfg config.Config) func(http.HandlerFunc) http.HandlerFunc {
+func AdminOnly(engine *cryden.Engine, cfg config.Config, operators *operator.Store) func(http.HandlerFunc) http.HandlerFunc {
 	if cfg.UsesSQLite() {
 		return func(http.HandlerFunc) http.HandlerFunc {
 			return func(w http.ResponseWriter, r *http.Request) {
@@ -150,7 +167,13 @@ func AdminOnly(engine *cryden.Engine, cfg config.Config) func(http.HandlerFunc) 
 			}
 		}
 	}
+	var roleStore interface {
+		RoleFor(context.Context, string) (string, bool, error)
+	}
+	if operators != nil {
+		roleStore = operators
+	}
 	return func(next http.HandlerFunc) http.HandlerFunc {
-		return RequireAdmin(engine, next)
+		return RequireAdmin(engine, roleStore, next)
 	}
 }
