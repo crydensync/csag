@@ -751,6 +751,26 @@ components:
           default: 60
           description: Per-provider requests per minute.
 
+    LLMProviderTestInput:
+      type: object
+      description: >
+        The test body accepts the same provider settings as LLMProviderInput.
+        api_key may be omitted or empty to test with the credential already
+        stored by this deployment. The credential is used only server-side.
+      required: [kind, model]
+      properties:
+        kind:
+          type: string
+          enum: [anthropic, openai-compatible]
+        model: { type: string }
+        api_key:
+          type: string
+          description: Optional for tests of the saved provider; never returned.
+        base_url: { type: string, format: uri }
+        max_tokens: { type: integer, minimum: 256, maximum: 8192 }
+        temperature: { type: number, minimum: 0, maximum: 2 }
+        rpm: { type: integer, minimum: 1, maximum: 10000 }
+
     RedactedLLMProvider:
       type: object
       description: >
@@ -3643,13 +3663,18 @@ paths:
   /admin/settings/llm-provider/test:
     post:
       summary: Test an LLM provider configuration
-      description: Admin only. Makes one bounded provider call and returns status without storing or returning the credential.
+      description: >
+        Admin only. Makes one bounded provider call and returns status without
+        storing or returning the credential. An omitted or empty api_key uses
+        the credential already stored for the provider, so a redacted saved
+        configuration can be tested without sending its key back to the
+        browser.
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/LLMProviderInput' }
+            schema: { $ref: '#/components/schemas/LLMProviderTestInput' }
       responses:
         '200': { description: Provider responded with a supported query intent }
         '400': { $ref: '#/components/responses/BadRequest' }
@@ -3666,9 +3691,11 @@ paths:
           application/json:
             schema:
               type: object
-              required: [api_key, base_url]
+              required: [base_url]
               properties:
-                api_key: { type: string }
+                api_key:
+                  type: string
+                  description: Optional when a provider credential is already stored.
                 base_url: { type: string, format: uri }
       responses:
         '200': { description: Available model identifiers }

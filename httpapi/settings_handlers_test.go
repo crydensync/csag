@@ -185,12 +185,27 @@ func TestLLMProviderTestAndModelsUseConfiguredCompatibleEndpoint(t *testing.T) {
 	if strings.Contains(tested.Body.String(), "provider-secret") {
 		t.Fatalf("test response disclosed provider credential: %s", tested.Body.String())
 	}
+	if saved := f.do(t, http.MethodPut, llmProviderPath, f.adminToken, config); saved.Code != http.StatusOK {
+		t.Fatalf("save settings: status = %d, body %s", saved.Code, saved.Body.String())
+	}
+	savedConfig := strings.Replace(config, `"api_key":"provider-secret"`, `"api_key":""`, 1)
+	tested = f.do(t, http.MethodPost, llmProviderPath+"/test", f.adminToken, savedConfig)
+	if tested.Code != http.StatusOK {
+		t.Fatalf("test saved provider: status = %d, body %s", tested.Code, tested.Body.String())
+	}
+	if strings.Contains(tested.Body.String(), "provider-secret") {
+		t.Fatalf("saved-provider test response disclosed credential: %s", tested.Body.String())
+	}
 	models := f.do(t, http.MethodPost, llmProviderPath+"/models", f.adminToken, `{"api_key":"provider-secret","base_url":"`+provider.URL+`/v1"}`)
 	if models.Code != http.StatusOK || !strings.Contains(models.Body.String(), "model-x") {
 		t.Fatalf("models status = %d, body %s", models.Code, models.Body.String())
 	}
 	if strings.Contains(models.Body.String(), "provider-secret") {
 		t.Fatalf("models response disclosed provider credential: %s", models.Body.String())
+	}
+	models = f.do(t, http.MethodPost, llmProviderPath+"/models", f.adminToken, `{"api_key":"","base_url":"`+provider.URL+`/v1"}`)
+	if models.Code != http.StatusOK || !strings.Contains(models.Body.String(), "model-x") {
+		t.Fatalf("saved-key model list status = %d, body %s", models.Code, models.Body.String())
 	}
 }
 

@@ -159,10 +159,27 @@ func (h *SettingsHandlers) PutLLMProvider(w http.ResponseWriter, r *http.Request
 // TestLLMProvider calls the configured model with a short, fixed diagnostic
 // question. It never stores or returns the supplied credential.
 func (h *SettingsHandlers) TestLLMProvider(w http.ResponseWriter, r *http.Request) {
+	if !h.Secrets.Configured() {
+		writeErr(w, errSettingsNotConfigured)
+		return
+	}
 	var dto llmProviderDTO
 	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
 		writeBadRequest(w, "malformed request body")
 		return
+	}
+	if dto.APIKey == "" {
+		plaintext, err := h.Secrets.Get(r.Context(), settings.KeyLLMProvider)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		saved, err := settings.UnmarshalLLMProvider(plaintext)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		dto.APIKey = saved.APIKey
 	}
 	config := dto.config()
 	if err := config.Validate(); err != nil {
@@ -195,10 +212,30 @@ type llmModelsDTO struct {
 
 // LLMModels lists the model ids exposed by an OpenAI-compatible endpoint.
 func (h *SettingsHandlers) LLMModels(w http.ResponseWriter, r *http.Request) {
+	if !h.Secrets.Configured() {
+		writeErr(w, errSettingsNotConfigured)
+		return
+	}
 	var dto llmModelsDTO
 	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
 		writeBadRequest(w, "malformed request body")
 		return
+	}
+	if dto.APIKey == "" {
+		plaintext, err := h.Secrets.Get(r.Context(), settings.KeyLLMProvider)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		saved, err := settings.UnmarshalLLMProvider(plaintext)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		dto.APIKey = saved.APIKey
+		if dto.BaseURL == "" {
+			dto.BaseURL = saved.BaseURL
+		}
 	}
 	if err := (settings.LLMProviderConfig{
 		Kind: settings.LLMProviderKindOpenAICompatible, Model: "model-list", APIKey: dto.APIKey,
