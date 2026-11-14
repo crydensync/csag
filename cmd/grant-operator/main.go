@@ -23,6 +23,7 @@ import (
 
 	"github.com/crydensync/cryden/v2/store/postgres"
 
+	"github.com/crydensync/api/internal/postgresdb"
 	"github.com/crydensync/api/operator"
 )
 
@@ -37,7 +38,7 @@ func main() {
 		log.Fatal("usage: grant-operator -db <DATABASE_URL> -email <email> [-role <role>] [-revoke]")
 	}
 
-	db, err := sql.Open("postgres", *dbURL)
+	db, err := sql.Open("postgres", postgresdb.DSNWithSearchPath(*dbURL, postgresdb.AuthSchema))
 	if err != nil {
 		log.Fatalf("open db: %v", err)
 	}

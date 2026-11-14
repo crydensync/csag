@@ -39,13 +39,9 @@ const postgresMigrationDir = "migrations"
 
 // migrationTable is the Postgres tracking table: one row per applied file.
 //
-// The name is unprefixed, unlike cryden's SQLite table
-// (cryden_schema_migrations), and cryden's own comment gives the reason —
-// a SQLite database is very often an application's only database and is
-// shared with the host's other tables, so the prefix is doing real work
-// there. A dedicated Postgres database is this repo's, so the plain name
-// is the honest one and matches what a Postgres operator already expects
-// from Flyway, golang-migrate and friends.
+// This table is created in crydensync_auth because PostgreSQL connections
+// pin their search_path to that schema. SQLite continues to use cryden's
+// separate migration tracker and runner.
 //
 // The DDL below is written to run on both backends unchanged: TEXT and
 // PRIMARY KEY mean the same thing on each, and applied_at is RFC3339 text
@@ -261,6 +257,9 @@ func migrate(ctx context.Context, db *sql.DB, usesSQLite bool) (string, error) {
 		}
 		return "sqlite schema is up to date (applied by cryden's own runner)", nil
 	}
+	if err := preparePostgresSchema(ctx, db, false); err != nil {
+		return "", err
+	}
 
 	sub, err := fs.Sub(postgresMigrations, postgresMigrationDir)
 	if err != nil {
@@ -284,6 +283,9 @@ func migrate(ctx context.Context, db *sql.DB, usesSQLite bool) (string, error) {
 func baseline(ctx context.Context, db *sql.DB, usesSQLite bool) (string, error) {
 	if usesSQLite {
 		return "", errors.New("--baseline is for a Postgres database that already has this schema; a SQLite deployment is migrated by cryden's runner, which cannot be in that state")
+	}
+	if err := preparePostgresSchema(ctx, db, true); err != nil {
+		return "", err
 	}
 
 	sub, err := fs.Sub(postgresMigrations, postgresMigrationDir)

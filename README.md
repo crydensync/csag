@@ -129,7 +129,7 @@ There is no migrate step in the setup instructions because there does not need t
 
 The two backends are migrated by different code, and that is deliberate rather than an inconsistency:
 
-- **Postgres** — this repo's own runner (`migrate.go`) over this repo's own `migrations/*.sql`, embedding all fourteen into the binary. It records what it applied in a `schema_migrations` table it creates itself, so a second boot is a no-op.
+- **Postgres** — this repo's own runner (`migrate.go`) applies this repo's embedded `migrations/*.sql`. Every CSAG-owned auth and admin table, including `schema_migrations`, lives in the `crydensync_auth` schema. This lets a product share the same PostgreSQL database while keeping its own tables (for example, in `public`) separate. CSAG sets the connection `search_path` for its auth pool; the separate read-only AI database connection is unaffected.
 - **SQLite** — cryden's runner over cryden's embedded migrations, because cryden owns that schema. See [The two backends](#the-two-backends).
 
 Both follow the same rules: `NNN_*.up.sql` in filename order, one transaction per file, and `.down.sql` files are never run automatically — an automatic rollback of a schema holding live credentials is not something a boot path should be able to do by accident.
@@ -141,9 +141,11 @@ api migrate --baseline # record every embedded migration as already applied
 
 `api migrate` is for teams who would rather schema changes be a reviewed step than something that happens during a rolling deploy. Set `SKIP_AUTO_MIGRATE=true` and the server starts without touching the schema; `api migrate` is then the step, in your pipeline, before the new version goes out.
 
-**If your database already has this schema but no `schema_migrations` table** — you applied the SQL by hand, or an earlier version of this repo had CI do it for you via `psql` — then run `api migrate --baseline` once before your first start. Without it, auto-migration starts at `001` and stops on `relation "users" already exists`: a deployment that cannot start, caused by the feature meant to make starting easier. Baseline records every embedded migration as applied and runs none of them.
+An existing CSAG database created by an earlier version with tables in `public` is moved into `crydensync_auth` automatically when its `public.schema_migrations` contains CSAG's initial migration marker. PostgreSQL moves the tables without copying their rows; indexes, constraints and foreign keys remain attached. Any unrelated product tables in `public` stay there. Take a database backup before deploying this schema transition.
 
-It is an explicit command rather than something the boot path detects, because the alternative is guessing. "The tracking table is missing but `users` exists, so assume everything ran" is right for the case above and silently wrong for a database that is genuinely half-migrated — it would mark unrun migrations as applied, and the next deploy would look for columns that were never created.
+**If your existing CSAG tables in `public` have no migration tracker**, run `api migrate --baseline` once before starting the new version. This explicit command requires the existing `users`, `sessions` and `audit_events` tables, moves the known CSAG tables, and records the embedded migrations as applied without running them. It leaves an unrelated `public.schema_migrations` table in place. If both public and auth schemas already have a migration tracker, migration stops and requires manual resolution rather than guessing.
+
+It is an explicit command rather than something the boot path detects, because the alternative is guessing. Without the baseline, a new isolated CSAG schema could be initialized beside the old public tables and the API would not see the existing users. Baseline is the operator's assertion that the old CSAG schema is complete; it avoids marking unapplied migrations as complete in a partially migrated database.
 
 ## Second factors
 

@@ -40,6 +40,7 @@ import (
 	"github.com/crydensync/api/config"
 	"github.com/crydensync/api/digest"
 	"github.com/crydensync/api/httpapi"
+	"github.com/crydensync/api/internal/postgresdb"
 	"github.com/crydensync/api/jwtclaims"
 	"github.com/crydensync/api/operator"
 	"github.com/crydensync/api/passwordpolicy"
@@ -135,6 +136,8 @@ func openDatabase(cfg config.Config) (*sql.DB, error) {
 	driver, dsn := "postgres", cfg.DatabaseURL
 	if cfg.UsesSQLite() {
 		driver, dsn = "sqlite", sqliteDSN(cfg.SQLitePath)
+	} else {
+		dsn = postgresdb.DSNWithSearchPath(dsn, postgresAuthSchema)
 	}
 
 	db, err := sql.Open(driver, dsn)
