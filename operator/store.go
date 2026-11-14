@@ -24,6 +24,7 @@ import (
 var (
 	ErrInvalidRole = errors.New("operator: role must be owner, admin, or viewer")
 	ErrLastOwner   = errors.New("operator: cannot remove or demote the last owner")
+	ErrNotFound    = errors.New("operator: no such operator")
 )
 
 type Operator struct {
@@ -116,6 +117,37 @@ func (s *Store) List(ctx context.Context) ([]Operator, error) {
 		return nil, err
 	}
 	return items, nil
+}
+
+// SetRole serializes role updates and refuses to leave the installation without an owner.
+func (s *Store) SetRole(ctx context.Context, userID, role string) error {
+	if !ValidRole(role) {
+		return ErrInvalidRole
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `LOCK TABLE operators IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+		return err
+	}
+	var current string
+	if err := tx.QueryRowContext(ctx, `SELECT role FROM operators WHERE user_id = $1`, userID).Scan(&current); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if current == "owner" && role != "owner" {
+		if err := ensureAnotherOwner(ctx, tx); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE operators SET role = $2 WHERE user_id = $1`, userID, role); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Revoke removes an operator. It is idempotent for a user with no operator row,

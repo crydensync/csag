@@ -47,8 +47,9 @@ type Deps struct {
 	// exposes no bulk way to inspect stored password hashes, so the
 	// migration is measured from the audit events the engine already
 	// records against the user total.
-	Audit store.AuditStore
-	Users store.UserStore
+	Audit    store.AuditStore
+	Users    store.UserStore
+	Passkeys store.WebAuthnCredentialStore
 
 	// Sessions backs the live-session count on GET
 	// /v1/admin/users/{userID}. The same instance the engine holds, so
@@ -166,7 +167,7 @@ func NewRouter(d Deps) http.Handler {
 	askAI := &WidgetHandlers{Service: d.AskAI}
 	widgetRateLimiter := NewWidgetUserRateLimiter(d.Config.AskAIRateLimit, d.Config.AskAIRateLimitWindow)
 	adminAI := &AdminAIHandlers{Service: d.AskAI, LogReader: d.Shipped, Audit: d.Audit}
-	operatorHandlers := &OperatorHandlers{Store: d.Operators}
+	operatorHandlers := &OperatorHandlers{Store: d.Operators, DB: d.DB, Config: d.Config, Users: d.Users, Passkeys: d.Passkeys, Sessions: d.Sessions, Audit: d.Audit}
 	docs := NewDocsHandler()
 
 	// The gate for every route under /v1/admin, resolved once. On a
@@ -177,6 +178,25 @@ func NewRouter(d Deps) http.Handler {
 	// property of the router rather than a list to keep in sync. See
 	// AdminOnly.
 	adminOnly := AdminOnly(engine, d.Config, d.Operators)
+	ownerOnly := func(next http.HandlerFunc) http.HandlerFunc {
+		return adminOnly(func(w http.ResponseWriter, r *http.Request) {
+			if d.Operators == nil {
+				writeErr(w, errAdminStoresUnavailable)
+				return
+			}
+			userID, _ := r.Context().Value(userIDContextKey).(string)
+			role, active, err := d.Operators.RoleFor(r.Context(), userID)
+			if err != nil {
+				writeErr(w, err)
+				return
+			}
+			if !active || role != "owner" {
+				writeErr(w, errNotOwner)
+				return
+			}
+			next(w, r)
+		})
+	}
 
 	mux := http.NewServeMux()
 
@@ -343,6 +363,10 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("POST /v1/admin/sessions/revoke-all", adminOnly(adminSessions.RevokeAll))
 	mux.HandleFunc("GET /v1/admin/audit", adminOnly(auditLog.List))
 	mux.HandleFunc("GET /v1/admin/operators", adminOnly(operatorHandlers.List))
+	mux.HandleFunc("POST /v1/admin/operators/step-up/begin", ownerOnly(operatorHandlers.BeginStepUp))
+	mux.HandleFunc("POST /v1/admin/operators/step-up/finish", ownerOnly(operatorHandlers.FinishStepUp))
+	mux.HandleFunc("PUT /v1/admin/operators/{userID}", ownerOnly(func(w http.ResponseWriter, r *http.Request) { operatorHandlers.SetRole(w, r, r.PathValue("userID")) }))
+	mux.HandleFunc("DELETE /v1/admin/operators/{userID}", ownerOnly(func(w http.ResponseWriter, r *http.Request) { operatorHandlers.Remove(w, r, r.PathValue("userID")) }))
 
 	// The account actions. Every one changes an account that is not the
 	// operator's, which is what kept this surface unwritten until the

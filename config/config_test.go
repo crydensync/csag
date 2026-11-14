@@ -41,6 +41,8 @@ var tieredEnvVars = []string{
 	"CLOUD_LOG_REDACTION",
 	"CLOUD_LOG_HASH_KEY",
 	"EMAIL_TEMPLATE_DIR",
+	"EMAIL_DELIVERY_URL",
+	"EMAIL_DELIVERY_TOKEN",
 	"WEBHOOK_URL",
 	"WEBHOOK_SECRET",
 	"WEBHOOK_EVENTS",
@@ -48,6 +50,31 @@ var tieredEnvVars = []string{
 	"LOCKOUT_THRESHOLD",
 	"LOCKOUT_DURATION_MINUTES",
 	"DIGEST_INTERVAL_HOURS",
+}
+
+func TestEmailDeliveryRelayConfiguration(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		env       map[string]string
+		wantError bool
+	}{
+		{name: "disabled by default"},
+		{name: "requires URL and secret together", env: map[string]string{"EMAIL_DELIVERY_URL": "https://mail.example.test/callback"}, wantError: true},
+		{name: "requires secret and URL together", env: map[string]string{"EMAIL_DELIVERY_TOKEN": "secret"}, wantError: true},
+		{name: "rejects remote HTTP", env: map[string]string{"EMAIL_DELIVERY_URL": "http://mail.example.test/callback", "EMAIL_DELIVERY_TOKEN": "secret"}, wantError: true},
+		{name: "accepts loopback HTTP", env: map[string]string{"EMAIL_DELIVERY_URL": "http://127.0.0.1:3037/callback", "EMAIL_DELIVERY_TOKEN": "secret"}},
+		{name: "accepts HTTPS", env: map[string]string{"EMAIL_DELIVERY_URL": "https://mail.example.test/callback", "EMAIL_DELIVERY_TOKEN": "secret"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := loadForTest(t, tc.env)
+			if (err != nil) != tc.wantError {
+				t.Fatalf("Load() error = %v, wantError %v", err, tc.wantError)
+			}
+			if err == nil && cfg.EmailDeliveryURL != tc.env["EMAIL_DELIVERY_URL"] {
+				t.Errorf("EmailDeliveryURL = %q", cfg.EmailDeliveryURL)
+			}
+		})
+	}
 }
 
 func loadForTest(t *testing.T, env map[string]string) (Config, error) {

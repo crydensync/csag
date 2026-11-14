@@ -123,6 +123,24 @@ func TestAdminAIActionsRequireAdminAuthentication(t *testing.T) {
 	}
 }
 
+func TestOperatorMutationRoutesRequireAuthentication(t *testing.T) {
+	router := NewRouter(Deps{Config: config.Config{DatabaseURL: "postgres://user:pw@localhost/db"}})
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodPost, "/v1/admin/operators/step-up/begin"},
+		{http.MethodPost, "/v1/admin/operators/step-up/finish"},
+		{http.MethodPut, "/v1/admin/operators/01a1d782-0635-7e41-bd60-50e1cfef5fc8"},
+		{http.MethodDelete, "/v1/admin/operators/01a1d782-0635-7e41-bd60-50e1cfef5fc8"},
+	} {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, strings.NewReader(`{}`)))
+			if rec.Code != http.StatusUnauthorized || decodeError(t, rec).Code != "missing_auth_header" {
+				t.Fatalf("%s %s = %d, body %s; want authenticated admin gate", tc.method, tc.path, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
 // The 501 is a statement about /v1/admin, not about the deployment. Core
 // auth is what a SQLite deployment is FOR, so the routes around the admin
 // block must still be routed normally — a 401 from RequireAuth is the

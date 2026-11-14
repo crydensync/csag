@@ -259,6 +259,10 @@ GET    /v1/admin/users                    (admin required)
 GET    /v1/admin/users/{userID}           (admin required)
 GET    /v1/admin/users/{userID}/metadata  (admin required)
 GET    /v1/admin/operators               (admin required, live roster)
+POST   /v1/admin/operators/step-up/begin (owner required, WebAuthn)
+POST   /v1/admin/operators/step-up/finish (owner required, WebAuthn)
+PUT    /v1/admin/operators/{userID}      (owner + one-use step-up grant)
+DELETE /v1/admin/operators/{userID}      (owner + one-use step-up grant)
 PUT    /v1/admin/users/{userID}/metadata/{key}     (admin required)
 DELETE /v1/admin/users/{userID}/metadata/{key}     (admin required)
 GET    /v1/admin/anomalies                (admin required)
@@ -297,7 +301,7 @@ Authenticated endpoints expect `Authorization: Bearer <access_token>`.
 
 ## Admin endpoints
 
-Everything under `/v1/admin` requires an **operator** token: a valid access token whose `role` claim is `admin`. Operator status is this repo's own concept, not cryden's — it lives in its own `operators` table (`migrations/003_operators.*.sql`), and the claim is attached to the token at issue time by the `AccessTokenClaims` provider in `main.go`. An ordinary user's token carries no `role` claim at all, so "revoked operator", "never was one" and "no such user" are indistinguishable to a caller, deliberately.
+Everything under `/v1/admin` requires an **operator** token: a valid access token with an active `admin` or `owner` row. The API checks the live role in its own `operators` table (`migrations/003_operators.*.sql`), so revoking or changing a role applies immediately even while an older token remains valid. Operator status is this repo's own concept, not cryden's; an ordinary user's token carries no `role` claim at all, so "revoked operator", "never was one" and "no such user" are indistinguishable to a caller, deliberately.
 
 On a SQLite deployment this entire section is unavailable and every route in it answers `501 not_implemented_on_sqlite` — the console's tables are Postgres-only. See [The two backends](#the-two-backends).
 
@@ -308,7 +312,7 @@ go run ./cmd/grant-operator -db "$DATABASE_URL" -email you@example.com
 go run ./cmd/grant-operator -db "$DATABASE_URL" -email you@example.com -revoke
 ```
 
-Because the claim is baked in at issue time, a grant takes effect on that user's next login or refresh, and a revoke the same way — an already-issued token keeps its claim until it expires (15 minutes by default).
+Owner role changes and removals require a fresh WebAuthn assertion with user verification. Begin and finish return the browser ceremony options and then a short-lived grant; write calls present the grant in `X-CSAG-Operator-Grant`. It is bound to the owner, exact bearer token and operation, expires after 20 seconds and can be consumed once. The final owner cannot be demoted or removed. Passkeys must be configured with `WEBAUTHN_RP_ID`, `WEBAUTHN_RP_DISPLAY_NAME`, `WEBAUTHN_RP_ORIGINS` and `ENCRYPTION_KEY`.
 
 `GET /v1/admin/oauth/health` reports, per provider, whether it is configured and whether its authorize endpoint answers:
 
@@ -608,7 +612,7 @@ The LLM API key and the database connection string are sealed with **AES-256-GCM
 ## Design notes
 
 - `CORS_ORIGINS` is required, no wildcard default — an API handling auth tokens should never allow every origin.
-- `consoleEmailSender` (in `email_sender.go`) is a dev stand-in — logs verification tokens to the console instead of sending real email. Replace with a real provider (Resend, SES, SendGrid) before real users depend on email verification. Set `EMAIL_TEMPLATE_DIR` and it renders your own `verification.txt` / `magic_link.txt` (`text/template`, fields `{{.To}}`, `{{.Token}}`, `{{.URL}}`) instead of its built-in line; cryden owns no message copy on purpose, so templates are entirely this repo's — see `templates/`.
+- `consoleEmailSender` (in `email_sender.go`) is a dev stand-in — logs verification tokens to the console instead of sending real email. Set both `EMAIL_DELIVERY_URL` and `EMAIL_DELIVERY_TOKEN` to relay `{kind,to,token}` to a consuming application's HTTPS callback; the consumer owns provider credentials and actual delivery. Plain HTTP callbacks are accepted only on loopback for local development. Set `EMAIL_TEMPLATE_DIR` and it renders your own `verification.txt` / `magic_link.txt` (`text/template`, fields `{{.To}}`, `{{.Token}}`, `{{.URL}}`) instead of its built-in line; cryden owns no message copy on purpose, so templates are entirely this repo's — see `templates/`.
 - Every engine error is mapped to a stable `(status, code)` pair in `httpapi/errors.go` — add new engine errors there once, every handler benefits. `*auth.ErrOAuthEmailConflict` is the one non-sentinel case in that file (it's a struct carrying `Email`/`Provider`, unwrapped via `errors.As` rather than `errors.Is`).
 - The OAuth linking flow's HMAC-signed cookie (`oauth_handlers.go`) is genuinely new plumbing, not copied from an existing pattern elsewhere in this repo — worth reading closely if you're touching that code, not just trusting it because it compiles.
 - A paused login is a `200`, not an error: nothing failed, the caller just has one more step. `httpapi/second_factor.go` is the one place that response shape is written.

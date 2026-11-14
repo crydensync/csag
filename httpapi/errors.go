@@ -15,6 +15,7 @@ import (
 	"github.com/crydensync/api/anomalyreview"
 	"github.com/crydensync/api/askai"
 	"github.com/crydensync/api/digest"
+	"github.com/crydensync/api/operator"
 	"github.com/crydensync/api/settings"
 	"github.com/crydensync/api/usermeta"
 )
@@ -43,6 +44,7 @@ var errMissingAuthHeader = errors.New("missing or malformed Authorization header
 // revoked operator, and an unrecognized user all look identical here
 // on purpose (see operator/store.go and RequireAdmin).
 var errNotOperator = errors.New("this account does not have console operator access")
+var errNotOwner = errors.New("only owners can manage operators")
 
 // errNotImplementedOnSQLite is returned for every admin route on a
 // SQLite deployment, before the token is even looked at.
@@ -93,6 +95,16 @@ func mapError(err error) apiError {
 		return apiError{http.StatusUnauthorized, "missing_auth_header", "missing or malformed Authorization header"}
 	case errors.Is(err, errNotOperator):
 		return apiError{http.StatusForbidden, "not_operator", "this account does not have console operator access"}
+	case errors.Is(err, errNotOwner):
+		return apiError{http.StatusForbidden, "owner_required", "only owners can change operator access"}
+	case errors.Is(err, errStepUpRequired):
+		return apiError{http.StatusForbidden, "step_up_required", "fresh verified passkey authentication is required for this operator action"}
+	case errors.Is(err, operator.ErrLastOwner):
+		return apiError{http.StatusConflict, "last_owner", "the last owner cannot be demoted or removed"}
+	case errors.Is(err, operator.ErrInvalidRole):
+		return apiError{http.StatusBadRequest, "invalid_operator_role", "role must be owner, admin, or viewer"}
+	case errors.Is(err, operator.ErrNotFound):
+		return apiError{http.StatusNotFound, "operator_not_found", "no such operator"}
 	// Checked before errNotOperator's neighbours and by no other route:
 	// a SQLite deployment has no admin surface at all, so this is a
 	// statement about the deployment rather than about the caller. 501

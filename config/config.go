@@ -3,6 +3,7 @@ package config
 import (
 	"bufio"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -238,6 +239,12 @@ type Config struct {
 	// template is a startup failure, the same class of typo as an
 	// unparseable REDIS_URL.
 	EmailTemplateDir string
+
+	// EmailDeliveryURL and EmailDeliveryToken relay generated message
+	// payloads to the consuming application. The consumer owns provider
+	// credentials and sends the actual email.
+	EmailDeliveryURL   string
+	EmailDeliveryToken string
 
 	// WebhookURL is where engine events are delivered. Empty means this
 	// deployment dispatches none: Config.Webhooks stays nil, nothing is
@@ -622,6 +629,20 @@ func Load() (Config, error) {
 	// Email templates. Optional: unset keeps the console senders' own
 	// text. main.go is what reports a directory that is set but broken.
 	cfg.EmailTemplateDir = os.Getenv("EMAIL_TEMPLATE_DIR")
+	cfg.EmailDeliveryURL = strings.TrimSpace(os.Getenv("EMAIL_DELIVERY_URL"))
+	cfg.EmailDeliveryToken = os.Getenv("EMAIL_DELIVERY_TOKEN")
+	if (cfg.EmailDeliveryURL == "") != (cfg.EmailDeliveryToken == "") {
+		return cfg, fmt.Errorf("EMAIL_DELIVERY_URL and EMAIL_DELIVERY_TOKEN must be configured together")
+	}
+	if cfg.EmailDeliveryURL != "" {
+		deliveryURL, parseErr := url.ParseRequestURI(cfg.EmailDeliveryURL)
+		if parseErr != nil || deliveryURL.Host == "" || (deliveryURL.Scheme != "https" && deliveryURL.Scheme != "http") {
+			return cfg, fmt.Errorf("EMAIL_DELIVERY_URL must be an absolute HTTP or HTTPS URL")
+		}
+		if deliveryURL.Scheme == "http" && deliveryURL.Hostname() != "localhost" && deliveryURL.Hostname() != "127.0.0.1" && deliveryURL.Hostname() != "::1" {
+			return cfg, fmt.Errorf("EMAIL_DELIVERY_URL must use HTTPS except for loopback development")
+		}
+	}
 
 	// Webhooks. WEBHOOK_URL is the on/off switch; everything else only
 	// means anything with it set, which is why the block below refuses the

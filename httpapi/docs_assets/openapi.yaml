@@ -1547,7 +1547,7 @@ paths:
   /admin/operators:
     get:
       summary: Current console operator roster
-      description: Admin only. Returns the live roles in the API's operator store. Operator management writes are not exposed by this API version.
+      description: Admin only. Returns the live roles in the API's operator store.
       security: [{ bearerAuth: [] }]
       responses:
         '200':
@@ -1575,7 +1575,84 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
-
+  /admin/operators/step-up/begin:
+    post:
+      summary: Begin owner WebAuthn step-up
+      description: Owner only. Creates a 60-second, single-use challenge tied to this access token and action purpose. User verification is required.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [purpose]
+              properties:
+                purpose: { type: string, enum: [operator_role_change, operator_remove] }
+      responses:
+        '200': { description: Passkey request options and opaque ceremony token }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+  /admin/operators/step-up/finish:
+    post:
+      summary: Verify owner WebAuthn step-up
+      description: Owner only. Verifies an assertion with user verification and returns a one-use grant bound to the exact access token and purpose. The grant expires after 20 seconds.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [purpose, ceremony_token, credential]
+              properties:
+                purpose: { type: string, enum: [operator_role_change, operator_remove] }
+                ceremony_token: { type: string }
+                credential: { type: object, additionalProperties: true }
+      responses:
+        '200': { description: Verified one-use grant }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+  /admin/operators/{userID}:
+    put:
+      summary: Change an operator role
+      description: Owner only. Requires a fresh grant from the role-change step-up purpose. The final owner cannot be demoted.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: userID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: X-CSAG-Operator-Grant, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { type: string, enum: [owner, admin, viewer] }
+      responses:
+        '200': { description: Role updated }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: Last owner protection }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+    delete:
+      summary: Remove an operator
+      description: Owner only. Requires a fresh grant from the operator-removal step-up purpose. The final owner cannot be removed, and the target's sessions are revoked.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: userID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: X-CSAG-Operator-Grant, in: header, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Operator removed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: Last owner protection }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
   /admin/sessions:
     get:
       summary: Active sessions across all accounts

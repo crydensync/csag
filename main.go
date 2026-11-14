@@ -28,6 +28,7 @@ import (
 	"github.com/crydensync/cryden/v2"
 	"github.com/crydensync/cryden/v2/admin"
 	"github.com/crydensync/cryden/v2/logger"
+	"github.com/crydensync/cryden/v2/notify"
 	"github.com/crydensync/cryden/v2/security"
 	"github.com/crydensync/cryden/v2/store"
 	"github.com/crydensync/cryden/v2/store/postgres"
@@ -358,14 +359,22 @@ func serve() {
 	if globalClaims != nil {
 		claimsProvider = globalClaims
 	}
+	var emailSender notify.EmailSender = &consoleEmailSender{Templates: emailTemplates}
+	var magicLinkSender notify.MagicLinkSender = &consoleMagicLinkSender{BaseURL: cfg.BaseURL, Templates: emailTemplates}
+	if cfg.EmailDeliveryURL != "" {
+		consumerSender := newConsumerEmailSender(cfg.EmailDeliveryURL, cfg.EmailDeliveryToken)
+		emailSender = consumerSender
+		magicLinkSender = consumerSender
+		log.Printf("email delivery is relayed to the consuming application")
+	}
 	engineCfg := cryden.Config{
 		JWTSecret:       cfg.JWTSecret,
 		Users:           users,
 		Sessions:        sessions,
 		Audit:           audit,
 		Verifications:   st.verifications,
-		EmailSender:     &consoleEmailSender{Templates: emailTemplates},                           // dev stand-in — see email_sender.go
-		MagicLinkSender: &consoleMagicLinkSender{BaseURL: cfg.BaseURL, Templates: emailTemplates}, // dev stand-in — see email_sender.go
+		EmailSender:     emailSender,
+		MagicLinkSender: magicLinkSender,
 		AccessTokenTTL:  cfg.AccessTokenTTL,
 		OAuth:           st.oauth,
 
@@ -659,6 +668,7 @@ func serve() {
 		Config:      cfg,
 		Audit:       audit,
 		Users:       users,
+		Passkeys:    st.webauthn,
 		Meta:        metadata,
 		Hooks:       webhookStore,
 		WebhookWake: webhookWake,
