@@ -351,7 +351,7 @@ func TestTier7TheTrackingTableIsCreatedByTheRunner(t *testing.T) {
 // The embedded files are the part that cannot be tested against SQLite,
 // so what is asserted here is the part that can: that they are actually
 // embedded, that they parse as up-migrations, and that they are the
-// fifteen this repo ships. A mistake in the //go:embed pattern would
+// seventeen this repo ships. A mistake in the //go:embed pattern would
 // otherwise show up as a deployment that starts with no schema.
 func TestTier7TheEmbeddedPostgresMigrationsArePresent(t *testing.T) {
 	sub, err := fs.Sub(postgresMigrations, postgresMigrationDir)
@@ -363,15 +363,15 @@ func TestTier7TheEmbeddedPostgresMigrationsArePresent(t *testing.T) {
 		t.Fatalf("upMigrationNames: %v", err)
 	}
 
-	if len(names) != 16 {
-		t.Errorf("embedded %d up-migrations, want 16: %v", len(names), names)
+	if len(names) != 17 {
+		t.Errorf("embedded %d up-migrations, want 17: %v", len(names), names)
 	}
 	if names[0] != "001_initial_schema.up.sql" {
 		t.Errorf("first embedded migration is %q", names[0])
 	}
-	// The last one is host-owned (016_operator_stepup_lockouts), so this also
+	// The last one is host-owned (017_operator_stepup_purposes), so this also
 	// pins that the embed is not somehow picking up cryden's numbering.
-	if last := names[len(names)-1]; last != "016_operator_stepup_lockouts.up.sql" {
+	if last := names[len(names)-1]; last != "017_operator_stepup_purposes.up.sql" {
 		t.Errorf("last embedded migration is %q", last)
 	}
 
