@@ -561,6 +561,8 @@ components:
             than dropping the event, which is exactly why the primary
             key is `id` and not this.
         event_type: { type: string, description: The audit event that fired, e.g. account_locked. }
+        destination_id: { type: string, description: Stable runtime endpoint ID captured when queued. }
+        destination_name: { type: string, description: Endpoint label captured when queued, retained after endpoint removal. }
         user_id:
           type: string
           format: uuid
@@ -2439,6 +2441,102 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
 
+  /admin/webhooks/endpoints:
+    get:
+      summary: List encrypted runtime webhook destinations
+      description: Admin only. Returns stable IDs, names, URLs, and secret-set flags. Signing secrets are never returned.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Configured destinations }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Runtime settings are not configured }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+    post:
+      summary: Add a webhook destination
+      description: Admin only. Each active audit event is queued once per destination. The signing secret is encrypted at rest.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, url, secret]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 80 }
+                url: { type: string, format: uri }
+                secret: { type: string, writeOnly: true }
+      responses:
+        '201': { description: Created destination; secret is never returned }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Runtime settings are not configured }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/webhooks/endpoints/{endpointID}:
+    put:
+      summary: Update a webhook destination
+      description: Admin only. Omitting secret preserves the current key. An ID of default manages the legacy default endpoint.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: endpointID
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 80 }
+                url: { type: string, format: uri }
+                secret: { type: string, writeOnly: true }
+      responses:
+        '200': { description: Updated destination, secret is never returned }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Destination does not exist }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+    delete:
+      summary: Remove a webhook destination
+      description: Admin only. Removal is refused while this destination has pending or in-flight deliveries.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: endpointID
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Removed destination }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Destination does not exist }
+        '409': { description: Destination still has queued deliveries }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/webhooks/endpoints/{endpointID}/test:
+    post:
+      summary: Queue a test for one destination
+      description: Admin only. Queues an asynchronous synthetic event addressed to this destination.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: endpointID
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '202': { description: Test delivery queued }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Destination does not exist }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
   /admin/webhooks/test:
     post:
       summary: Queue a test webhook event
@@ -2480,6 +2578,11 @@ paths:
         third party, and this surface reports rather than acts.
       security: [{ bearerAuth: [] }]
       parameters:
+        - name: destination_id
+          in: query
+          required: false
+          schema: { type: string }
+          description: Restrict history to one destination ID. Each destination receives an independent queued delivery and retry history.
         - name: status
           in: query
           required: false

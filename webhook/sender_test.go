@@ -279,3 +279,36 @@ func (s failingStore) MarkFailed(context.Context, int64, Result, *time.Time) err
 	return s.err
 }
 func (s failingStore) List(context.Context, Status, int) ([]Delivery, error) { return nil, s.err }
+func (s failingStore) ListDestination(context.Context, Status, string, int) ([]Delivery, error) {
+	return nil, s.err
+}
+func (s failingStore) HasUnresolvedDestination(context.Context, string) (bool, error) {
+	return false, s.err
+}
+
+func TestSendWebhookFansOutOneDurableRowPerDestination(t *testing.T) {
+	store := NewMemoryStore()
+	sender := &Sender{
+		Store: store,
+		Destinations: func() []Destination {
+			return []Destination{{ID: "endpoint-a", Name: "Billing"}, {ID: "endpoint-b", Name: "Security"}}
+		},
+	}
+	if err := sender.SendWebhook(context.Background(), testEvent()); err != nil {
+		t.Fatalf("SendWebhook: %v", err)
+	}
+	rows, err := store.List(context.Background(), "", 10)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want one per destination", len(rows))
+	}
+	seen := map[string]string{}
+	for _, row := range rows {
+		seen[row.DestinationID] = row.DestinationName
+	}
+	if seen["endpoint-a"] != "Billing" || seen["endpoint-b"] != "Security" {
+		t.Errorf("destinations = %#v", seen)
+	}
+}

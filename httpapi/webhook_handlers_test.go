@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/crydensync/cryden/v2/token"
 
 	"github.com/crydensync/api/config"
+	"github.com/crydensync/api/settings"
 	"github.com/crydensync/api/webhook"
 )
 
@@ -88,6 +90,7 @@ type webhookFixture struct {
 
 	adminToken string
 	userToken  string
+	secrets    *settings.Secrets
 }
 
 // newWebhookFixture builds an engine whose operator carries the admin
@@ -142,12 +145,18 @@ func newWebhookFixture(t *testing.T) webhookFixture {
 		t.Fatalf("login (user): %v", err)
 	}
 
+	secretStore := settings.NewMemoryStore()
+	secrets, err := settings.NewSecrets(secretStore, "a-test-encryption-key-long-enough-to-be-plausible")
+	if err != nil {
+		t.Fatalf("NewSecrets: %v", err)
+	}
 	return webhookFixture{
 		store:      store,
 		clock:      clock,
-		router:     NewRouter(Deps{Engine: engine, Config: config.Config{}, Hooks: store}),
+		router:     NewRouter(Deps{Engine: engine, Config: config.Config{}, Hooks: store, Settings: secrets}),
 		adminToken: adminTokens.AccessToken,
 		userToken:  userTokens.AccessToken,
+		secrets:    secrets,
 	}
 }
 
@@ -473,5 +482,75 @@ func TestWebhookDeliveriesRouteIsGatedByRequireAdmin(t *testing.T) {
 	}
 	if rec := f.list(t, f.adminToken, ""); rec.Code != http.StatusOK {
 		t.Errorf("operator: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestWebhookEndpointCRUDAndTargetedTestDelivery(t *testing.T) {
+	f := newWebhookFixture(t)
+	request := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+f.adminToken)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		f.router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	created := request(http.MethodPost, "/v1/admin/webhooks/endpoints", `{"name":"Billing","url":"https://billing.example/hooks","secret":"billing-signing-secret"}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status = %d: %s", created.Code, created.Body.String())
+	}
+	var createResponse struct {
+		Data webhookEndpointDTO `json:"data"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &createResponse); err != nil {
+		t.Fatal(err)
+	}
+	endpoint := createResponse.Data
+	if !validEndpointID(endpoint.ID) || endpoint.Name != "Billing" || endpoint.URL != "https://billing.example/hooks" || !endpoint.SecretSet {
+		t.Fatalf("created endpoint = %#v", endpoint)
+	}
+	if strings.Contains(created.Body.String(), "billing-signing-secret") {
+		t.Fatal("response exposed signing secret")
+	}
+
+	listed := request(http.MethodGet, "/v1/admin/webhooks/endpoints", "")
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), endpoint.ID) || strings.Contains(listed.Body.String(), "billing-signing-secret") {
+		t.Fatalf("endpoint listing = %d %s", listed.Code, listed.Body.String())
+	}
+
+	tested := request(http.MethodPost, "/v1/admin/webhooks/endpoints/"+endpoint.ID+"/test", "")
+	if tested.Code != http.StatusAccepted {
+		t.Fatalf("test status = %d: %s", tested.Code, tested.Body.String())
+	}
+	rows, err := f.store.ListDestination(context.Background(), "", endpoint.ID, 10)
+	if err != nil || len(rows) != 1 || rows[0].DestinationName != "Billing" || rows[0].EventType != "webhook.test" {
+		t.Fatalf("targeted test row = %#v, err=%v", rows, err)
+	}
+
+	updated := request(http.MethodPut, "/v1/admin/webhooks/endpoints/"+endpoint.ID, `{"name":"Billing v2","url":"https://billing.example/v2"}`)
+	if updated.Code != http.StatusOK || strings.Contains(updated.Body.String(), "billing-signing-secret") {
+		t.Fatalf("update response = %d %s", updated.Code, updated.Body.String())
+	}
+	stored, err := f.secrets.Get(context.Background(), settings.WebhookEndpointKey(endpoint.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := settings.UnmarshalWebhookEndpoint(stored)
+	if err != nil || config.Secret != "billing-signing-secret" || config.Name != "Billing v2" {
+		t.Fatalf("updated config = %#v, err=%v", config, err)
+	}
+
+	blocked := request(http.MethodDelete, "/v1/admin/webhooks/endpoints/"+endpoint.ID, "")
+	if blocked.Code != http.StatusConflict {
+		t.Fatalf("pending destination removal status = %d, want 409: %s", blocked.Code, blocked.Body.String())
+	}
+	f.resolve(t, rows[0].ID, true)
+	removed := request(http.MethodDelete, "/v1/admin/webhooks/endpoints/"+endpoint.ID, "")
+	if removed.Code != http.StatusOK {
+		t.Fatalf("delete status = %d: %s", removed.Code, removed.Body.String())
+	}
+	if _, err := f.secrets.Get(context.Background(), settings.WebhookEndpointKey(endpoint.ID)); !errors.Is(err, settings.ErrNotFound) {
+		t.Fatalf("deleted endpoint remains, err=%v", err)
 	}
 }

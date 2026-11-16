@@ -111,3 +111,12 @@ func (s *Secrets) Delete(ctx context.Context, key string) error {
 	}
 	return s.store.Delete(ctx, key)
 }
+
+// Keys returns setting names only. It never decrypts or returns values and
+// is used to enumerate independently encrypted runtime webhook destinations.
+func (s *Secrets) Keys(ctx context.Context) ([]string, error) {
+	if s == nil || s.store == nil {
+		return nil, ErrNoEncryptionKey
+	}
+	return s.store.Keys(ctx)
+}

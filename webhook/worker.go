@@ -79,6 +79,10 @@ type Worker struct {
 	// When nil, URL and Secret above retain the environment-configured behavior.
 	Endpoint func() (url, secret string)
 
+	// Destination resolves a queued destination snapshot. It takes precedence
+	// over Endpoint, which remains for callers using the legacy single target.
+	Destination func(id string) (url, secret string)
+
 	// MaxAttempts is the total number of attempts a delivery gets,
 	// including the first. Zero means DefaultMaxAttempts.
 	MaxAttempts int
@@ -155,7 +159,7 @@ func Verify(secret string, body []byte, header string) bool {
 // next boot, which is why stopping promptly is safe here.
 func (w *Worker) Run(ctx context.Context) {
 	w.applyDefaults()
-	if w.Secret == "" && w.Endpoint == nil {
+	if w.Secret == "" && w.Endpoint == nil && w.Destination == nil {
 		w.logf("webhook worker: WEBHOOK_SECRET is not set — deliveries are unsigned")
 	}
 
@@ -284,7 +288,9 @@ func (w *Worker) resolve(ctx context.Context, d Delivery, result Result) {
 func (w *Worker) post(ctx context.Context, d Delivery) Result {
 	start := w.Now()
 	url, secret := w.URL, w.Secret
-	if w.Endpoint != nil {
+	if w.Destination != nil {
+		url, secret = w.Destination(d.DestinationID)
+	} else if w.Endpoint != nil {
 		url, secret = w.Endpoint()
 	}
 	if strings.TrimSpace(url) == "" {

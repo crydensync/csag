@@ -41,7 +41,8 @@ const (
 	// KeyPasswordPolicy stores the non-secret active password policy.
 	KeyPasswordPolicy = "password_policy"
 	// KeyWebhookEndpoint stores the one runtime-managed delivery target.
-	KeyWebhookEndpoint = "webhook_endpoint"
+	KeyWebhookEndpoint       = "webhook_endpoint"
+	KeyWebhookEndpointPrefix = "webhook_endpoint:"
 )
 
 // ErrNotFound means nothing is stored under that key yet. Reported

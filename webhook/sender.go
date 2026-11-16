@@ -31,6 +31,12 @@ type Sender struct {
 	// Nil keeps the original always-enabled behavior.
 	Enabled func() bool
 
+	// Destinations snapshots the active configured targets at enqueue time.
+	// One durable row is written per target so retries and history remain
+	// associated with the destination that existed when the event occurred.
+	// Nil retains the legacy single-target behavior and uses "default".
+	Destinations func() []Destination
+
 	// Wake is nudged, non-blockingly, after a successful enqueue. It is a
 	// hint and never a guarantee: a full buffer, a nil channel or a worker
 	// that is not running all simply mean the worker finds the row on its
@@ -45,6 +51,8 @@ type Sender struct {
 	// short enough that a broken one fails while the user is still waiting.
 	EnqueueTimeout time.Duration
 }
+
+type Destination struct{ ID, Name string }
 
 // DefaultEnqueueTimeout bounds the insert SendWebhook performs.
 const DefaultEnqueueTimeout = 5 * time.Second
@@ -132,14 +140,25 @@ func (s *Sender) SendWebhook(ctx context.Context, event notify.WebhookEvent) err
 	enqueueCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 	defer cancel()
 
-	if err := s.Store.Enqueue(enqueueCtx, Delivery{
-		EventID:   event.ID,
-		EventType: event.Type,
-		UserID:    event.UserID,
-		IP:        event.IP,
-		Payload:   body,
-	}); err != nil {
-		return err
+	targets := []Destination{{ID: "default", Name: "Default"}}
+	if s.Destinations != nil {
+		targets = s.Destinations()
+	}
+	for _, target := range targets {
+		if target.ID == "" {
+			continue
+		}
+		if err := s.Store.Enqueue(enqueueCtx, Delivery{
+			EventID:         event.ID,
+			EventType:       event.Type,
+			DestinationID:   target.ID,
+			DestinationName: target.Name,
+			UserID:          event.UserID,
+			IP:              event.IP,
+			Payload:         body,
+		}); err != nil {
+			return err
+		}
 	}
 
 	// Non-blocking, and nil-safe: a send on a nil channel would block

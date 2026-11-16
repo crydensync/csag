@@ -129,7 +129,7 @@ There is no migrate step in the setup instructions because there does not need t
 
 The two backends are migrated by different code, and that is deliberate rather than an inconsistency:
 
-- **Postgres** — this repo's own runner (`migrate.go`) over this repo's own `migrations/*.sql`, embedding all fourteen into the binary. It records what it applied in a `schema_migrations` table it creates itself, so a second boot is a no-op.
+- **Postgres** — this repo's own runner (`migrate.go`) over this repo's own `migrations/*.sql`, embedding all fifteen into the binary. It records what it applied in a `schema_migrations` table it creates itself, so a second boot is a no-op.
 - **SQLite** — cryden's runner over cryden's embedded migrations, because cryden owns that schema. See [The two backends](#the-two-backends).
 
 Both follow the same rules: `NNN_*.up.sql` in filename order, one transaction per file, and `.down.sql` files are never run automatically — an automatic rollback of a schema holding live credentials is not something a boot path should be able to do by accident.

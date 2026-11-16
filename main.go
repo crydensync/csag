@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -512,19 +513,39 @@ func serve() {
 	// events worth waking someone for and excludes
 	// login_success/login_failed/token_rotated, the three that fire
 	// constantly and say nothing.
+	readWebhookEndpoints := func() map[string]settings.WebhookEndpointConfig {
+		if settingsSecrets == nil || !settingsSecrets.Configured() {
+			return nil
+		}
+		items, err := settings.RuntimeWebhookEndpoints(context.Background(), settingsSecrets)
+		if err != nil {
+			log.Printf("webhook configuration could not be read: %v", err)
+			return nil
+		}
+		return items
+	}
 	if webhookStore != nil {
 		engineCfg.Webhooks = &webhook.Sender{
 			Store: webhookStore,
 			Wake:  webhookWake,
-			Enabled: func() bool {
-				if settingsSecrets != nil && settingsSecrets.Configured() {
-					if raw, err := settingsSecrets.Get(context.Background(), settings.KeyWebhookEndpoint); err == nil {
-						if endpoint, err := settings.UnmarshalWebhookEndpoint(raw); err == nil && endpoint.URL != "" {
-							return true
-						}
+			Destinations: func() []webhook.Destination {
+				items := readWebhookEndpoints()
+				if len(items) == 0 {
+					if cfg.WebhookURL != "" {
+						return []webhook.Destination{{ID: "environment", Name: "Environment default"}}
 					}
+					return nil
 				}
-				return cfg.WebhookURL != ""
+				ids := make([]string, 0, len(items))
+				for id := range items {
+					ids = append(ids, id)
+				}
+				sort.Strings(ids)
+				out := make([]webhook.Destination, 0, len(ids))
+				for _, id := range ids {
+					out = append(out, webhook.Destination{ID: id, Name: items[id].Name})
+				}
+				return out
 			},
 		}
 		engineCfg.WebhookEvents = cfg.WebhookEvents
@@ -583,15 +604,18 @@ func serve() {
 	// what the stale reclaim exists for — see RunOnce's own note.
 	if webhookStore != nil {
 		worker := webhook.NewWorker(webhookStore, cfg.WebhookURL, cfg.WebhookSecret)
-		worker.Endpoint = func() (string, string) {
-			if settingsSecrets != nil && settingsSecrets.Configured() {
-				if raw, err := settingsSecrets.Get(context.Background(), settings.KeyWebhookEndpoint); err == nil {
-					if endpoint, err := settings.UnmarshalWebhookEndpoint(raw); err == nil {
-						return endpoint.URL, endpoint.Secret
-					}
-				}
+		worker.Destination = func(id string) (string, string) {
+			if id == "environment" {
+				return cfg.WebhookURL, cfg.WebhookSecret
 			}
-			return cfg.WebhookURL, cfg.WebhookSecret
+			items := readWebhookEndpoints()
+			if endpoint, ok := items[id]; ok {
+				return endpoint.URL, endpoint.Secret
+			}
+			if id == "default" {
+				return cfg.WebhookURL, cfg.WebhookSecret
+			}
+			return "", ""
 		}
 		worker.MaxAttempts = cfg.WebhookMaxAttempts
 		worker.Wake = webhookWake

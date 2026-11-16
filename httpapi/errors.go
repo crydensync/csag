@@ -136,6 +136,8 @@ func mapError(err error) apiError {
 		return apiError{http.StatusForbidden, "session_not_owned", "this session does not belong to you"}
 	case errors.Is(err, store.ErrNotFound):
 		return apiError{http.StatusNotFound, "not_found", "resource not found"}
+	case errors.Is(err, settings.ErrNotFound):
+		return apiError{http.StatusNotFound, "not_found", "resource not found"}
 	case errors.Is(err, token.ErrInvalidToken):
 		return apiError{http.StatusUnauthorized, "invalid_token", "refresh token is invalid"}
 	case errors.Is(err, token.ErrTokenReused):
