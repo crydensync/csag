@@ -28,10 +28,10 @@ var (
 )
 
 type Operator struct {
-	UserID    string
-	Email     string
-	Role      string
-	CreatedAt time.Time
+	UserID    string    `json:"user_id"`
+	Email     string    `json:"email"`
+	Role      string    `json:"role"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type Store struct {

@@ -40,6 +40,25 @@ func TestOperatorListReturnsLiveRoster(t *testing.T) {
 	if got := response.Data.Operators[0]; got.Role != "owner" || got.Email != "owner@example.com" || !got.CreatedAt.Equal(created) {
 		t.Fatalf("unexpected operator: %+v", got)
 	}
+	var raw struct {
+		Data struct {
+			Operators []map[string]json.RawMessage `json:"operators"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(raw.Data.Operators) != 1 {
+		t.Fatalf("unexpected raw operator roster: %+v", raw.Data.Operators)
+	}
+	for _, key := range []string{"user_id", "email", "role", "created_at"} {
+		if _, ok := raw.Data.Operators[0][key]; !ok {
+			t.Errorf("operator JSON is missing %q: %+v", key, raw.Data.Operators[0])
+		}
+	}
+	if len(raw.Data.Operators[0]) != 4 {
+		t.Errorf("operator JSON has unexpected fields: %+v", raw.Data.Operators[0])
+	}
 }
 
 func TestOperatorScopedActionsRejectNonOperators(t *testing.T) {
