@@ -557,6 +557,11 @@ func TestAskAIWidgetBeforeAnySaveIsDisabled(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"enabled":false`) {
 		t.Errorf("body = %s, want enabled:false", rec.Body.String())
 	}
+	for _, field := range []string{`"allowed_origins":[]`, `"entities":[]`} {
+		if !strings.Contains(rec.Body.String(), field) {
+			t.Errorf("body = %s, want %s", rec.Body.String(), field)
+		}
+	}
 }
 
 // The scope list is the one part of this setting with teeth, so what it

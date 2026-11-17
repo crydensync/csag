@@ -437,7 +437,13 @@ func (h *SettingsHandlers) AskAIWidget(w http.ResponseWriter, r *http.Request) {
 		// configured": the zero value is Enabled=false, so a console that
 		// renders it shows the feature as off rather than showing a form
 		// that looks saved.
-		writeData(w, http.StatusOK, settings.AskAIWidgetConfig{})
+		// Keep list fields as arrays in the public JSON contract. The zero
+		// value has nil slices, which encoding/json emits as null and clients
+		// correctly reject where they expect a list.
+		writeData(w, http.StatusOK, settings.AskAIWidgetConfig{
+			AllowedOrigins: []string{},
+			Entities:       []string{},
+		})
 		return
 	}
 	if err != nil {
