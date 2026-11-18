@@ -2729,6 +2729,40 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
 
+  /admin/database/migrations:
+    get:
+      summary: Applied and pending CSAG database migrations
+      description: Admin only. Reads the migration tracker in crydensync_auth and compares it with the migrations embedded in this API build. Read-only.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Migration state for the active CSAG database
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [schema, current, applied, pending]
+                    properties:
+                      schema: { type: string, example: crydensync_auth }
+                      current: { type: string, description: Latest applied migration name; empty if none. }
+                      applied:
+                        type: array
+                        items:
+                          type: object
+                          required: [name, applied_at]
+                          properties:
+                            name: { type: string }
+                            applied_at: { type: string }
+                      pending:
+                        type: array
+                        items: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
   /admin/logging/recent:
     get:
       summary: The shipped-events log, newest first

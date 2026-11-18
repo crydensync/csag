@@ -39,9 +39,10 @@ type Deps struct {
 	// DB is used only by the health handler, which pings it. Nil is fine
 	// for a router built without a database (tests); /v1/health then
 	// reports the database as unconfigured rather than panicking.
-	DB        *sql.DB
-	Config    config.Config
-	Operators *operator.Store
+	DB                 *sql.DB
+	Config             config.Config
+	Operators          *operator.Store
+	ExpectedMigrations []string
 
 	// Audit and Users back GET /v1/admin/security/hash-migration — cryden
 	// exposes no bulk way to inspect stored password hashes, so the
@@ -156,6 +157,7 @@ func NewRouter(d Deps) http.Handler {
 	auditLog := &AdminAuditHandlers{DB: d.DB}
 	hooks := &WebhookHandlers{Store: d.Hooks, Secrets: d.Settings, Wake: d.WebhookWake}
 	logging := &LoggingHandlers{Store: d.Shipped}
+	migrations := &MigrationHandlers{DB: d.DB, Expected: d.ExpectedMigrations}
 	loggingSettings := &LoggingSettingsHandlers{Runtime: d.LogRuntime, Redaction: d.Config.CloudLogRedaction, HashKeySet: d.Config.CloudLogHashKey != ""}
 	digests := &DigestHandlers{Engine: engine, Store: d.Digests}
 	digestSettings := &DigestSettingsHandlers{Runtime: d.DigestSchedule, Sender: d.DigestSender}
@@ -444,6 +446,7 @@ func NewRouter(d Deps) http.Handler {
 	// to see it: cryden keeps no history of what it logged, so this table
 	// is the history.
 	mux.HandleFunc("GET /v1/admin/logging/recent", adminOnly(logging.Recent))
+	mux.HandleFunc("GET /v1/admin/database/migrations", adminOnly(migrations.Status))
 	mux.HandleFunc("GET /v1/admin/settings/logging", adminOnly(loggingSettings.Read))
 	mux.HandleFunc("PUT /v1/admin/settings/logging", adminOnly(loggingSettings.Save))
 	mux.HandleFunc("POST /v1/admin/ai/query", adminOnly(adminAI.Query))

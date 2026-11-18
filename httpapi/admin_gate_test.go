@@ -24,6 +24,7 @@ var adminPaths = []string{
 	"/v1/admin/users/some-user-id/metadata",
 	"/v1/admin/webhooks/deliveries",
 	"/v1/admin/logging/recent",
+	"/v1/admin/database/migrations",
 	"/v1/admin/digest",
 	"/v1/admin/digest/history",
 	"/v1/admin/support/diagnose",

@@ -658,6 +658,11 @@ func serve() {
 		}
 	}
 
+	expectedMigrations, err := embeddedPostgresMigrationNames()
+	if err != nil {
+		log.Fatalf("reading embedded migrations: %v", err)
+	}
+
 	// Hoisted out of the Deps literal below because the teardown closes it:
 	// the cached provider pair holds a second database connection (the
 	// read-only one behind the AI query surface), and nothing else would
@@ -665,16 +670,17 @@ func serve() {
 	askAI := askai.New(settingsSecrets)
 
 	router := httpapi.NewRouter(httpapi.Deps{
-		Engine:      engine,
-		Operators:   st.operators,
-		DB:          db,
-		Config:      cfg,
-		Audit:       audit,
-		Users:       users,
-		Passkeys:    st.webauthn,
-		Meta:        metadata,
-		Hooks:       webhookStore,
-		WebhookWake: webhookWake,
+		Engine:             engine,
+		Operators:          st.operators,
+		DB:                 db,
+		Config:             cfg,
+		ExpectedMigrations: expectedMigrations,
+		Audit:              audit,
+		Users:              users,
+		Passkeys:           st.webauthn,
+		Meta:               metadata,
+		Hooks:              webhookStore,
+		WebhookWake:        webhookWake,
 
 		Sessions: sessions,
 

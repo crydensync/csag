@@ -229,6 +229,15 @@ func upMigrationNames(migrations fs.FS) ([]string, error) {
 	return names, nil
 }
 
+// embeddedPostgresMigrationNames returns the up-migrations shipped in this binary.
+func embeddedPostgresMigrationNames() ([]string, error) {
+	sub, err := fs.Sub(postgresMigrations, postgresMigrationDir)
+	if err != nil {
+		return nil, fmt.Errorf("reading embedded migrations: %w", err)
+	}
+	return upMigrationNames(sub)
+}
+
 // formatMigrationTime is RFC3339 in UTC. A constant format matters more
 // than which one: these values are written by one backend and read by
 // nobody, so the only real requirement is that they compare as strings.
