@@ -20,6 +20,7 @@ import (
 // go through the same explicit, human-confirmed settings path every other
 // one does.
 type LoggingHandlers struct {
+	RuntimeStore shiplog.Store
 	// Store is this repo's own shipped-events table. Nil when
 	// CLOUD_LOGGING is unset, which is a wiring fact rather than a server
 	// fault — the same 404 not_configured shape the OAuth health and
@@ -66,7 +67,16 @@ type logEventsDTO struct {
 // Recent — admin required (see router.go). Lists the shipped-events log
 // newest first, optionally restricted to a level and above.
 func (h *LoggingHandlers) Recent(w http.ResponseWriter, r *http.Request) {
-	if h.Store == nil {
+	h.list(w, r, h.Store, shiplog.SinkName)
+}
+
+// Runtime lists the bounded redacted event buffer from this API process.
+func (h *LoggingHandlers) Runtime(w http.ResponseWriter, r *http.Request) {
+	h.list(w, r, h.RuntimeStore, "runtime")
+}
+
+func (h *LoggingHandlers) list(w http.ResponseWriter, r *http.Request, store shiplog.Store, source string) {
+	if store == nil {
 		writeErr(w, errAdminStoresUnavailable)
 		return
 	}
@@ -95,7 +105,7 @@ func (h *LoggingHandlers) Recent(w http.ResponseWriter, r *http.Request) {
 		requested = strings.ToLower(raw)
 	}
 
-	entries, err := h.Store.List(r.Context(), minLevel, limit)
+	entries, err := store.List(r.Context(), minLevel, limit)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -108,7 +118,7 @@ func (h *LoggingHandlers) Recent(w http.ResponseWriter, r *http.Request) {
 			Level:     e.Level.String(),
 			Message:   e.Message,
 			Fields:    e.Fields,
-			Sink:      e.Sink,
+			Sink:      source,
 			ShippedAt: e.ShippedAt,
 		})
 	}

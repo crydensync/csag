@@ -30,9 +30,10 @@ import (
 // logger.Logger's fields are strings, and every string is valid JSON — but
 // the gap is worth naming rather than assuming away.
 type MemoryStore struct {
-	mu   sync.Mutex
-	rows []Entry
-	next int64
+	mu         sync.Mutex
+	rows       []Entry
+	next       int64
+	maxEntries int
 
 	// Clock stamps an entry that does not carry its own ShippedAt, so a
 	// test can make the listing's ordering deterministic instead of
@@ -41,7 +42,16 @@ type MemoryStore struct {
 }
 
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{Clock: func() time.Time { return time.Now().UTC() }}
+	return NewMemoryStoreLimit(0)
+}
+
+// NewMemoryStoreLimit retains at most maxEntries newest records. A zero limit
+// keeps the unbounded behavior used by test fixtures and explicit archives.
+func NewMemoryStoreLimit(maxEntries int) *MemoryStore {
+	if maxEntries < 0 {
+		maxEntries = 0
+	}
+	return &MemoryStore{Clock: func() time.Time { return time.Now().UTC() }, maxEntries: maxEntries}
 }
 
 var _ Store = (*MemoryStore)(nil)
@@ -56,6 +66,10 @@ func (s *MemoryStore) Insert(_ context.Context, e Entry) error {
 	e.Sink = sinkOr(e.Sink)
 	// A copy, so a caller reusing its map cannot rewrite the stored record.
 	e.Fields = copyFields(e.Fields)
+	if s.maxEntries > 0 && len(s.rows) == s.maxEntries {
+		copy(s.rows, s.rows[1:])
+		s.rows = s.rows[:len(s.rows)-1]
+	}
 	s.rows = append(s.rows, e)
 	return nil
 }

@@ -43,6 +43,7 @@ type Deps struct {
 	Config             config.Config
 	Operators          *operator.Store
 	ExpectedMigrations []string
+	RuntimeLogs        shiplog.Store
 
 	// Audit and Users back GET /v1/admin/security/hash-migration — cryden
 	// exposes no bulk way to inspect stored password hashes, so the
@@ -156,8 +157,9 @@ func NewRouter(d Deps) http.Handler {
 	adminSessions := &AdminSessionHandlers{DB: d.DB, Engine: engine, Audit: d.Audit}
 	auditLog := &AdminAuditHandlers{DB: d.DB}
 	hooks := &WebhookHandlers{Store: d.Hooks, Secrets: d.Settings, Wake: d.WebhookWake}
-	logging := &LoggingHandlers{Store: d.Shipped}
+	logging := &LoggingHandlers{Store: d.Shipped, RuntimeStore: d.RuntimeLogs}
 	migrations := &MigrationHandlers{DB: d.DB, Expected: d.ExpectedMigrations}
+	databaseHandlers := &DatabaseHandlers{DB: d.DB}
 	loggingSettings := &LoggingSettingsHandlers{Runtime: d.LogRuntime, Redaction: d.Config.CloudLogRedaction, HashKeySet: d.Config.CloudLogHashKey != ""}
 	digests := &DigestHandlers{Engine: engine, Store: d.Digests}
 	digestSettings := &DigestSettingsHandlers{Runtime: d.DigestSchedule, Sender: d.DigestSender}
@@ -446,7 +448,12 @@ func NewRouter(d Deps) http.Handler {
 	// to see it: cryden keeps no history of what it logged, so this table
 	// is the history.
 	mux.HandleFunc("GET /v1/admin/logging/recent", adminOnly(logging.Recent))
+	mux.HandleFunc("GET /v1/admin/logging/runtime", adminOnly(logging.Runtime))
 	mux.HandleFunc("GET /v1/admin/database/migrations", adminOnly(migrations.Status))
+	mux.HandleFunc("GET /v1/admin/database/tables", adminOnly(databaseHandlers.ListTables))
+	mux.HandleFunc("GET /v1/admin/database/tables/{table}", adminOnly(func(w http.ResponseWriter, r *http.Request) {
+		databaseHandlers.ReadTable(w, r, r.PathValue("table"))
+	}))
 	mux.HandleFunc("GET /v1/admin/settings/logging", adminOnly(loggingSettings.Read))
 	mux.HandleFunc("PUT /v1/admin/settings/logging", adminOnly(loggingSettings.Save))
 	mux.HandleFunc("POST /v1/admin/ai/query", adminOnly(adminAI.Query))

@@ -96,7 +96,7 @@ func newLoggingFixture(t *testing.T) loggingFixture {
 
 	return loggingFixture{
 		store:      store,
-		router:     NewRouter(Deps{Engine: engine, Config: config.Config{}, Shipped: store}),
+		router:     NewRouter(Deps{Engine: engine, Config: config.Config{}, Shipped: store, RuntimeLogs: store}),
 		adminToken: adminTokens.AccessToken,
 		userToken:  userTokens.AccessToken,
 	}
@@ -124,6 +124,23 @@ func (f loggingFixture) recent(t *testing.T, token, query string) *httptest.Resp
 	rec := httptest.NewRecorder()
 	f.router.ServeHTTP(rec, req)
 	return rec
+}
+
+func TestRuntimeLogRouteListsCurrentProcessBuffer(t *testing.T) {
+	f := newLoggingFixture(t)
+	f.record(t, logger.LevelWarn, "token rotation warning", map[string]string{"ip": "203.0.113.9"})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/logging/runtime?level=warn", nil)
+	req.Header.Set("Authorization", "Bearer "+f.adminToken)
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("runtime log status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	response := decodeLogEvents(t, rec)
+	if response.Data.Count != 1 || response.Data.Events[0].Message != "token rotation warning" || response.Data.Events[0].Sink != "runtime" {
+		t.Fatalf("runtime log response = %+v", response.Data)
+	}
 }
 
 func decodeLogEvents(t *testing.T, rec *httptest.ResponseRecorder) logEventsResponse {

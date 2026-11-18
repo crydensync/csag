@@ -2729,6 +2729,56 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
 
+  /admin/database/tables:
+    get:
+      summary: Read-only auth-schema table catalog
+      description: Admin only. Lists tables in the active crydensync_auth schema and marks reviewed columns that may be previewed. Secret and unreviewed fields are never returned as row data.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Tables and column metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      schema: { type: string, example: crydensync_auth }
+                      tables:
+                        type: array
+                        items: { type: object }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/database/tables/{table}:
+    get:
+      summary: Read a bounded page of reviewed table columns
+      description: Admin only. Read-only; rows are projected through a per-table safe-column allowlist. Credential-bearing and unreviewed fields are omitted.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: table
+          in: path
+          required: true
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, maximum: 100000, default: 0 }
+      responses:
+        '200': { description: A bounded page of reviewed rows }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Table is absent or has no reviewed columns }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
   /admin/database/migrations:
     get:
       summary: Applied and pending CSAG database migrations
@@ -2759,6 +2809,27 @@ paths:
                       pending:
                         type: array
                         items: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/logging/runtime:
+    get:
+      summary: Current process runtime log buffer
+      description: Admin only. Returns at most the newest 1000 redacted structured runtime events held in this CSAG process. The buffer is in memory and resets on restart; it is separate from the persistent shipped-events archive.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: level
+          in: query
+          required: false
+          schema: { type: string, enum: [debug, info, warn, error] }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+      responses:
+        '200': { description: Recent runtime events from this process }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }

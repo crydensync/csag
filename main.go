@@ -344,6 +344,9 @@ func serve() {
 		log.Fatalf("password policy: %v", err)
 	}
 
+	runtimeLogStore := shiplog.NewMemoryStoreLimit(1000)
+	runtimeLogSink := logger.NewMaskingRedactor(shiplog.NewLogger(runtimeLogStore))
+	runtimeLogSink.Info("runtime log capture started", map[string]string{"component": "csag"})
 	var shippedLog shiplog.Store
 	var loggingRuntime *shiplog.Runtime
 	if !cfg.UsesSQLite() {
@@ -574,6 +577,7 @@ func serve() {
 
 		engineCfg.Logger = logger.NewMultiLogger(
 			logger.NewConsoleJSONLogger(),
+			runtimeLogSink,
 			&shiplog.RuntimeLogger{Runtime: loggingRuntime, Sink: redacted},
 		)
 		log.Printf("cloud logging settings loaded: enabled=%t minimum=%s redaction=%s",
@@ -675,6 +679,7 @@ func serve() {
 		DB:                 db,
 		Config:             cfg,
 		ExpectedMigrations: expectedMigrations,
+		RuntimeLogs:        runtimeLogStore,
 		Audit:              audit,
 		Users:              users,
 		Passkeys:           st.webauthn,
@@ -749,6 +754,7 @@ func serve() {
 	}()
 
 	log.Printf("api listening on :%s (CORS origins: %v)", cfg.Port, cfg.CORSOrigins)
+	runtimeLogSink.Info("api listening", map[string]string{"port": cfg.Port})
 
 	var serveErr error
 	select {
