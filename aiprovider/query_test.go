@@ -1,7 +1,6 @@
 package aiprovider
 
 import (
-	"errors"
 	"strings"
 	"testing"
 
@@ -165,34 +164,13 @@ func TestRenderCell(t *testing.T) {
 	}
 }
 
-// Only Postgres' own insufficient_privilege is read as "the role is
-// read-only". Everything else has to fall through to unverifiable, or a
-// connection failure would be accepted as proof.
-func TestIsInsufficientPrivilegeAcceptsOnly42501(t *testing.T) {
-	if isInsufficientPrivilege(nil) {
-		t.Error("a nil error was read as insufficient privilege")
-	}
-	if isInsufficientPrivilege(errors.New("dial tcp: connection refused")) {
-		t.Error("a transport error was read as insufficient privilege")
-	}
-	if isInsufficientPrivilege(errors.New(`pq: permission denied for table users`)) {
-		t.Error("a plain error was read as insufficient privilege — only a parsed SQLSTATE may count")
-	}
-}
-
-// The probe statements are the evidence this whole check rests on, so
-// they must be a write and must not touch anything an operator would have
-// to clean up afterwards.
-func TestProbeStatementsWriteOnlyToATemporaryTable(t *testing.T) {
-	if !strings.HasPrefix(strings.ToUpper(probeCreate), "CREATE TEMP TABLE") {
-		t.Errorf("probeCreate = %q, want a TEMP table so a successful probe leaves nothing behind", probeCreate)
-	}
-	if !strings.HasPrefix(strings.ToUpper(probeInsert), "INSERT") {
-		t.Errorf("probeInsert = %q, want a genuine write", probeInsert)
-	}
-	for _, statement := range []string{probeCreate, probeInsert} {
-		if strings.Contains(strings.ToUpper(statement), "PG_CATALOG") || strings.Contains(strings.ToUpper(statement), "PUBLIC.") {
-			t.Errorf("probe statement %q touches a real schema", statement)
+func TestReadOnlyVerifierChecksTheQueryableTables(t *testing.T) {
+	for _, statement := range []string{"'SELECT'", "'INSERT'", "'UPDATE'", "'DELETE'", "'TRUNCATE'", "to_regclass"} {
+		if !strings.Contains(readOnlyPrivilegeQuery, statement) {
+			t.Errorf("privilege query %q does not check %s", readOnlyPrivilegeQuery, statement)
 		}
+	}
+	if strings.Contains(strings.ToUpper(readOnlyPrivilegeQuery), "TEMP TABLE") {
+		t.Fatal("read-only verification must not mistake PostgreSQL's default TEMP privilege for table write access")
 	}
 }

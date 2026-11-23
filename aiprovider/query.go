@@ -5,11 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
-	"github.com/lib/pq"
-
+	"github.com/crydensync/api/internal/postgresdb"
 	crydenai "github.com/crydensync/cryden/v2/ai"
 )
 
@@ -29,118 +29,60 @@ var ErrCannotVerifyReadOnly = errors.New("aiprovider: could not verify the datab
 // configuring a second database expects a few seconds at most.
 const readOnlyProbeTimeout = 10 * time.Second
 
-// probeTable is the scratch table the write attempt targets. It lives in
-// pg_temp, the session's own temporary schema, which is what makes this
-// check safe to run: the table exists only for the life of this
-// connection, is invisible to every other session, and is dropped by
-// Postgres when the connection closes — so a failed CREATE leaves nothing
-// behind for the operator to clean up.
-//
-// It is a single-column table with a single row. The point is not the
-// data, it is whether the server says yes.
-const (
-	probeCreate = `CREATE TEMP TABLE cryden_readonly_probe (id int)`
-	probeInsert = `INSERT INTO cryden_readonly_probe (id) VALUES (1)`
-)
+const readOnlyPrivilegeQuery = `
+	SELECT to_regclass($1)::text,
+	       has_table_privilege(current_user, to_regclass($1), 'SELECT'),
+	       has_table_privilege(current_user, to_regclass($1), 'INSERT'),
+	       has_table_privilege(current_user, to_regclass($1), 'UPDATE'),
+	       has_table_privilege(current_user, to_regclass($1), 'DELETE'),
+       has_table_privilege(current_user, to_regclass($1), 'TRUNCATE'),
+       has_any_column_privilege(current_user, to_regclass($1), 'INSERT'),
+       has_any_column_privilege(current_user, to_regclass($1), 'UPDATE')`
 
-// CheckReadOnly verifies that dsn names a role which cannot write.
-//
-// This is the check cryden's ai.QueryableStore interface asks for by name:
-// "MUST use a read-only Postgres role for this connection — that's a real
-// credential-level guarantee, not just a promise made in code, so a bug
-// in validation still can't cause a write." The allowlist in ai.validate.go
-// is the first line of defence; this is the line that holds when the
-// first one has a bug, because a role that cannot INSERT cannot INSERT
-// whatever a query builder does with its input.
-//
-// Which is also why this is checked by *attempting a write and confirming
-// it is rejected*, rather than by reading the role's attributes. Trusting
-// a checkbox, or pg_roles.rolsuper, or the presence of "readonly" in a
-// connection parameter would all be trusting a claim. Only the server's
-// refusal is evidence — and it is evidence about the actual role, on the
-// actual database, through the actual credentials, which no amount of
-// reading metadata can substitute for.
-//
-// The three outcomes are deliberately distinct:
-//
-//   - the write is refused  -> nil, the role is read-only
-//   - the write succeeds    -> ErrNotReadOnly
-//   - anything else         -> ErrCannotVerifyReadOnly
-//
-// The third is not a pass. A connection that never opened, a timeout, a
-// missing table privilege that fails the CREATE for a reason other than
-// read-onlyness — none of those prove anything, and treating them as
-// success would make this check pass exactly when it is least able to
-// tell.
+// CheckReadOnly verifies that the supplied role can SELECT the data entities
+// the AI query templates use and has no table-level data modification rights
+// on them. A temporary-table write is not a useful probe here: PostgreSQL
+// commonly grants TEMP on a database to PUBLIC, even for a role that has only
+// SELECT on the product tables.
 func CheckReadOnly(ctx context.Context, dsn string) error {
 	ctx, cancel := context.WithTimeout(ctx, readOnlyProbeTimeout)
 	defer cancel()
 
-	db, err := sql.Open("postgres", dsn)
+	db, err := sql.Open("postgres", postgresdb.DSNWithSearchPath(dsn, postgresdb.AuthSchema))
 	if err != nil {
 		return fmt.Errorf("%w: opening the connection: %v", ErrCannotVerifyReadOnly, err)
 	}
 	defer db.Close()
-
-	// One connection, used for both statements. pg_temp is per-session,
-	// so a pool that handed the CREATE and the INSERT to different
-	// connections would have the INSERT fail on a missing table — a
-	// refusal that looks like proof of read-onlyness and is not.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 
 	if err := db.PingContext(ctx); err != nil {
 		return fmt.Errorf("%w: connecting: %v", ErrCannotVerifyReadOnly, err)
 	}
-
-	// A read that must work, before any write is attempted. Without it, a
-	// role with no rights at all would fail the CREATE below and be
-	// reported as read-only — which is the right answer by accident, on a
-	// connection that cannot serve the feature either.
 	if _, err := db.ExecContext(ctx, `SELECT 1`); err != nil {
-		return fmt.Errorf("%w: the connection cannot run a query at all: %v", ErrCannotVerifyReadOnly, err)
+		return fmt.Errorf("%w: the connection cannot run a query: %v", ErrCannotVerifyReadOnly, err)
 	}
 
-	if _, err := db.ExecContext(ctx, probeCreate); err != nil {
-		// The CREATE failing is the expected outcome for a role that
-		// cannot write, and it is also what a dozen unrelated problems
-		// look like. Postgres distinguishes them: 42501 is
-		// insufficient_privilege, which is the server saying "this role
-		// may not do that". Anything else is reported as unverifiable
-		// rather than assumed to be a refusal.
-		if isInsufficientPrivilege(err) {
-			return nil
+	entities := make([]string, 0, len(crydenai.EntityColumns))
+	for entity := range crydenai.EntityColumns {
+		entities = append(entities, entity)
+	}
+	sort.Strings(entities)
+	for _, entity := range entities {
+		var relation sql.NullString
+		var canSelect, canInsert, canUpdate, canDelete, canTruncate, canInsertColumn, canUpdateColumn sql.NullBool
+		err := db.QueryRowContext(ctx, readOnlyPrivilegeQuery, entity).
+			Scan(&relation, &canSelect, &canInsert, &canUpdate, &canDelete, &canTruncate, &canInsertColumn, &canUpdateColumn)
+		if err != nil || !relation.Valid || !canSelect.Valid || !canSelect.Bool {
+			return fmt.Errorf("%w: cannot verify SELECT access to %s: %v", ErrCannotVerifyReadOnly, entity, err)
 		}
-		return fmt.Errorf("%w: creating the probe table: %v", ErrCannotVerifyReadOnly, err)
+		if (canInsert.Valid && canInsert.Bool) || (canUpdate.Valid && canUpdate.Bool) ||
+			(canDelete.Valid && canDelete.Bool) || (canTruncate.Valid && canTruncate.Bool) ||
+			(canInsertColumn.Valid && canInsertColumn.Bool) || (canUpdateColumn.Valid && canUpdateColumn.Bool) {
+			return fmt.Errorf("%w: role has a data-write grant on %s", ErrNotReadOnly, relation.String)
+		}
 	}
-
-	// The role could create a table. It is not read-only, and the INSERT
-	// is not needed to know that — but running it keeps the failure
-	// message specific about what succeeded, which is what an operator
-	// needs to go and fix the grant.
-	if _, err := db.ExecContext(ctx, probeInsert); err != nil {
-		return fmt.Errorf("%w: the role may create tables (INSERT failed separately: %v)", ErrNotReadOnly, err)
-	}
-	return fmt.Errorf("%w: the role both created a table and inserted a row", ErrNotReadOnly)
-}
-
-// isInsufficientPrivilege reports whether err is Postgres' own "this role
-// may not do that" — SQLSTATE 42501.
-//
-// Checked by code rather than by matching the message, because the
-// message is localized and reworded between major versions while the code
-// is not, and this is the branch that decides whether a connection is
-// accepted.
-func isInsufficientPrivilege(err error) bool {
-	var pqErr *pq.Error
-	if errors.As(err, &pqErr) {
-		return pqErr.Code == "42501"
-	}
-	// lib/pq returns the parsed error for anything the server answers,
-	// so a non-pq error here means the statement never reached Postgres.
-	// Reported as unverifiable rather than as a refusal, which is what
-	// the caller does with a false return.
-	return false
+	return nil
 }
 
 // PostgresSnapshot implements cryden's ai.QueryableStore over a
@@ -165,7 +107,7 @@ type PostgresSnapshot struct {
 // deployment whose stored connection has since gone bad reports a query
 // error rather than failing to start.
 func NewPostgresSnapshot(dsn string, maxRows int) (*PostgresSnapshot, error) {
-	db, err := sql.Open("postgres", dsn)
+	db, err := sql.Open("postgres", postgresdb.DSNWithSearchPath(dsn, postgresdb.AuthSchema))
 	if err != nil {
 		return nil, fmt.Errorf("aiprovider: opening the read-only connection: %w", err)
 	}
