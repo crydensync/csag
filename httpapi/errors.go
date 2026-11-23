@@ -110,6 +110,14 @@ func mapError(err error) apiError {
 		return apiError{http.StatusBadRequest, "invalid_operator_role", "role must be owner, admin, or viewer"}
 	case errors.Is(err, operator.ErrNotFound):
 		return apiError{http.StatusNotFound, "operator_not_found", "no such operator"}
+	case errors.Is(err, operator.ErrInvalidInvitationEmail):
+		return apiError{http.StatusBadRequest, "invalid_invitation_email", "a valid email address is required"}
+	case errors.Is(err, operator.ErrInvalidInvitationRole):
+		return apiError{http.StatusBadRequest, "invalid_invitation_role", "invitations can grant admin or viewer only"}
+	case errors.Is(err, operator.ErrInvitationEmailMismatch), errors.Is(err, operator.ErrInvalidInvitation):
+		return apiError{http.StatusNotFound, "invitation_not_found", "this invitation is invalid, expired, used, or belongs to another account"}
+	case errors.Is(err, operator.ErrAlreadyOperator):
+		return apiError{http.StatusConflict, "already_operator", "this account already has console access"}
 	// Checked before errNotOperator's neighbours and by no other route:
 	// a SQLite deployment has no admin surface at all, so this is a
 	// statement about the deployment rather than about the caller. 501

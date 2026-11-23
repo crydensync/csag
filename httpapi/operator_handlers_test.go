@@ -78,12 +78,12 @@ func TestOperatorScopedActionsRejectNonOperators(t *testing.T) {
 }
 
 func TestValidStepUpPurposes(t *testing.T) {
-	for _, purpose := range []string{"operator_role_change", "operator_remove", "operator_session_revoke", "operator_passkey_remove", "secret_reveal", "secret_mutation"} {
+	for _, purpose := range []string{"operator_role_change", "operator_remove", "operator_session_revoke", "operator_passkey_remove", "operator_invite", "secret_reveal", "secret_mutation"} {
 		if !validStepUpPurpose(purpose) {
 			t.Errorf("%q should be accepted", purpose)
 		}
 	}
-	for _, purpose := range []string{"", "session_revoke", "operator_invite"} {
+	for _, purpose := range []string{"", "session_revoke"} {
 		if validStepUpPurpose(purpose) {
 			t.Errorf("%q should be rejected", purpose)
 		}
@@ -102,6 +102,13 @@ func TestStepUpPurposeSeparatesOwnerActionsFromAdminSecrets(t *testing.T) {
 	}
 	if operatorAction.Code != http.StatusForbidden {
 		t.Fatalf("operator action status = %d, want 403", operatorAction.Code)
+	}
+	inviteAction := httptest.NewRecorder()
+	if h.authorizeStepUpPurpose(inviteAction, r, "operator_invite") {
+		t.Fatal("admin was allowed to step up to create an operator invitation")
+	}
+	if inviteAction.Code != http.StatusForbidden {
+		t.Fatalf("invite action status = %d, want 403", inviteAction.Code)
 	}
 
 	secretAction := httptest.NewRecorder()

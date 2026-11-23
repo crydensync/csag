@@ -1005,6 +1005,38 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '409': { $ref: '#/components/responses/Conflict' }
 
+  /operators/invitations/accept:
+    post:
+      summary: Accept an operator invitation for the authenticated account
+      description: The token is single-use, expires after seven days, and is bound to the authenticated account email. The recipient must already have a CrydenSync account. Sign in again after acceptance so the new role appears in access-token claims.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string, minLength: 43, maxLength: 43 }
+      responses:
+        '200':
+          description: Invitation accepted and role granted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      email: { type: string, format: email }
+                      role: { type: string, enum: [admin, viewer] }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { description: Invitation is invalid, expired, used, or for another account }
+        '409': { description: Account already has operator access }
+
   /login:
     post:
       summary: Authenticate and receive a token pair
@@ -1600,6 +1632,44 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+  /admin/operators/invitations:
+    post:
+      summary: Create a single-use console operator invitation
+      description: Owner only. Requires a fresh WebAuthn operator_invite grant. The API stores only a token hash, invalidates older unused invitations for the email, and returns the bearer token once. The admin constructs and shares the console link; CSAG does not send email. Invitations grant admin or viewer, never owner.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: X-CSAG-Operator-Grant, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, role]
+              properties:
+                email: { type: string, format: email, maxLength: 320 }
+                role: { type: string, enum: [admin, viewer] }
+      responses:
+        '201':
+          description: Invitation and one-time token, valid for seven days. The token is returned once.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [email, role, token, expires_at]
+                    properties:
+                      email: { type: string, format: email }
+                      role: { type: string, enum: [admin, viewer] }
+                      token: { type: string, minLength: 43, maxLength: 43 }
+                      expires_at: { type: string, format: date-time }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
   /admin/operators/step-up/begin:
     post:
       summary: Begin WebAuthn step-up
@@ -1613,7 +1683,7 @@ paths:
               type: object
               required: [purpose]
               properties:
-                purpose: { type: string, enum: [operator_role_change, operator_remove, operator_session_revoke, operator_passkey_remove, secret_reveal, secret_mutation] }
+                purpose: { type: string, enum: [operator_role_change, operator_remove, operator_session_revoke, operator_passkey_remove, operator_invite, secret_reveal, secret_mutation] }
       responses:
         '200': { description: Passkey request options and opaque ceremony token }
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -1633,7 +1703,7 @@ paths:
               type: object
               required: [purpose, ceremony_token, credential]
               properties:
-                purpose: { type: string, enum: [operator_role_change, operator_remove, operator_session_revoke, operator_passkey_remove, secret_reveal, secret_mutation] }
+                purpose: { type: string, enum: [operator_role_change, operator_remove, operator_session_revoke, operator_passkey_remove, operator_invite, secret_reveal, secret_mutation] }
                 ceremony_token: { type: string }
                 credential: { type: object, additionalProperties: true }
       responses:

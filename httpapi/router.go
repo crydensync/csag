@@ -367,9 +367,11 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("POST /v1/admin/sessions/revoke-all", adminOnly(adminSessions.RevokeAll))
 	mux.HandleFunc("GET /v1/admin/audit", adminOnly(auditLog.List))
 	mux.HandleFunc("GET /v1/admin/operators", adminOnly(operatorHandlers.List))
+	mux.HandleFunc("POST /v1/admin/operators/invitations", ownerOnly(operatorHandlers.CreateInvitation))
 	mux.HandleFunc("POST /v1/admin/operators/step-up/begin", adminOnly(operatorHandlers.BeginStepUp))
 	mux.HandleFunc("POST /v1/admin/operators/step-up/finish", adminOnly(operatorHandlers.FinishStepUp))
 	mux.HandleFunc("POST /v1/admin/operators/step-up/consume", adminOnly(operatorHandlers.ConsumeStepUp))
+	mux.HandleFunc("POST /v1/operators/invitations/accept", RequireAuth(engine, operatorHandlers.AcceptInvitation))
 	mux.HandleFunc("PUT /v1/admin/operators/{userID}", ownerOnly(func(w http.ResponseWriter, r *http.Request) { operatorHandlers.SetRole(w, r, r.PathValue("userID")) }))
 	mux.HandleFunc("DELETE /v1/admin/operators/{userID}", ownerOnly(func(w http.ResponseWriter, r *http.Request) { operatorHandlers.Remove(w, r, r.PathValue("userID")) }))
 	mux.HandleFunc("GET /v1/admin/operators/{userID}/sessions", ownerOnly(func(w http.ResponseWriter, r *http.Request) {

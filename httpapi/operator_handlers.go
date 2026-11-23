@@ -314,7 +314,7 @@ func nextStepUpFailure(count int, windowStarted time.Time, now time.Time) (int, 
 
 func validStepUpPurpose(s string) bool {
 	switch s {
-	case "operator_role_change", "operator_remove", "operator_session_revoke", "operator_passkey_remove", "secret_reveal", "secret_mutation":
+	case "operator_role_change", "operator_remove", "operator_session_revoke", "operator_passkey_remove", "operator_invite", "secret_reveal", "secret_mutation":
 		return true
 	default:
 		return false
@@ -398,6 +398,74 @@ func (h *OperatorHandlers) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeData(w, http.StatusOK, map[string]any{"operators": items, "total": len(items)})
+}
+
+func (h *OperatorHandlers) CreateInvitation(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Email string `json:"email"`
+		Role  string `json:"role"`
+	}
+	if json.NewDecoder(io.LimitReader(r.Body, 16<<10)).Decode(&req) != nil {
+		writeBadRequest(w, "a valid email and invitation role are required")
+		return
+	}
+	if err := h.consumeGrant(r, "operator_invite"); err != nil {
+		writeErr(w, err)
+		return
+	}
+	creatorID := UserIDFromContext(r)
+	creator, ok := h.Store.(interface {
+		CreateInvitation(context.Context, string, string, string) (operator.Invitation, error)
+	})
+	if !ok {
+		writeErr(w, errAdminStoresUnavailable)
+		return
+	}
+	invitation, err := creator.CreateInvitation(r.Context(), req.Email, req.Role, creatorID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if h.Audit != nil {
+		_ = h.Audit.Record(r.Context(), store.AuditEvent{Type: store.AuditEventType("operator_invitation_created"), UserID: creatorID, IP: CallerIP(r), Metadata: map[string]string{"email": invitation.Email, "role": invitation.Role}})
+	}
+	writeData(w, http.StatusCreated, invitation)
+}
+
+func (h *OperatorHandlers) AcceptInvitation(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Token string `json:"token"`
+	}
+	if json.NewDecoder(io.LimitReader(r.Body, 16<<10)).Decode(&req) != nil || len(req.Token) != 43 {
+		writeBadRequest(w, "a valid invitation token is required")
+		return
+	}
+	if h.Users == nil || h.Audit == nil {
+		writeErr(w, errAdminStoresUnavailable)
+		return
+	}
+	userID := UserIDFromContext(r)
+	user, err := h.Users.GetByID(r.Context(), userID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	acceptor, ok := h.Store.(interface {
+		AcceptInvitation(context.Context, string, string, string) (operator.Invitation, error)
+	})
+	if !ok {
+		writeErr(w, errAdminStoresUnavailable)
+		return
+	}
+	invitation, err := acceptor.AcceptInvitation(r.Context(), userID, user.Email, req.Token)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := h.Audit.Record(r.Context(), store.AuditEvent{Type: store.AuditEventType("operator_invitation_accepted"), UserID: userID, IP: CallerIP(r), Metadata: map[string]string{"role": invitation.Role}}); err != nil {
+		log.Printf("operator invitation: audit record error: %v", err)
+	}
+	writeData(w, http.StatusOK, map[string]string{"email": invitation.Email, "role": invitation.Role})
 }
 
 func (h *OperatorHandlers) SetRole(w http.ResponseWriter, r *http.Request, userID string) {
