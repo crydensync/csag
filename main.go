@@ -40,6 +40,7 @@ import (
 	"github.com/crydensync/api/config"
 	"github.com/crydensync/api/digest"
 	"github.com/crydensync/api/httpapi"
+	"github.com/crydensync/api/internal/admininvite"
 	"github.com/crydensync/api/internal/postgresdb"
 	"github.com/crydensync/api/jwtclaims"
 	"github.com/crydensync/api/operator"
@@ -51,10 +52,9 @@ import (
 	"github.com/crydensync/api/webhook"
 )
 
-// usage is what an unrecognised argument prints. It names the two things
-// the binary does rather than listing flags, because there are no flags:
-// `migrate` takes only --baseline and the server takes only env vars.
-const usage = `usage: api [command]
+// usage is what an unrecognised argument prints. It names the available
+// commands; admin invite has its own bounded flag set.
+const usage = `usage: csag [command]
 
   (no command)   run the server, applying any pending migrations first
                  unless SKIP_AUTO_MIGRATE=true
@@ -62,7 +62,9 @@ const usage = `usage: api [command]
                  --baseline  record every embedded migration as already
                              applied, running none of them. For a Postgres
                              database that has this schema but no
-                             schema_migrations table — see migrate.go`
+                             schema_migrations table — see migrate.go
+  admin invite   create a one-time operator invite link
+                 --db, --console-url, --email and --role are required`
 
 func main() {
 	// Dispatch before config.Load, deliberately. `api --help` on a machine
@@ -80,6 +82,10 @@ func main() {
 		serve()
 	case args[0] == "migrate":
 		runMigrate(args[1:])
+	case len(args) >= 2 && args[0] == "admin" && args[1] == "invite":
+		if err := admininvite.Run(args[2:], os.Stdout, os.Stderr); err != nil {
+			log.Fatalf("admin invite: %v", err)
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s\n", args[0], usage)
 		os.Exit(2)

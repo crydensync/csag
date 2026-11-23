@@ -129,7 +129,7 @@ There is no migrate step in the setup instructions because there does not need t
 
 The two backends are migrated by different code, and that is deliberate rather than an inconsistency:
 
-- **Postgres** — this repo's own runner (`migrate.go`) applies this repo's embedded `migrations/*.sql`. Every CSAG-owned auth and admin table, including `schema_migrations`, lives in the `crydensync_auth` schema. This lets a product share the same PostgreSQL database while keeping its own tables (for example, in `public`) separate. CSAG sets the connection `search_path` for its auth pool; the separate read-only AI database connection is unaffected.
+- **Postgres** — this repo's own runner (`migrate.go`) applies this repo's embedded `migrations/*.sql`. Every CSAG-owned auth and admin table, including `schema_migrations`, lives in the `crydensync_auth` schema. This lets a product share the same PostgreSQL database while keeping its own tables (for example, in `public`) separate. CSAG pins both its auth pool and AI query connections to this schema; the AI login still needs only SELECT on the query tables.
 - **SQLite** — cryden's runner over cryden's embedded migrations, because cryden owns that schema. See [The two backends](#the-two-backends).
 
 Both follow the same rules: `NNN_*.up.sql` in filename order, one transaction per file, and `.down.sql` files are never run automatically — an automatic rollback of a schema holding live credentials is not something a boot path should be able to do by accident.
@@ -313,6 +313,20 @@ The first operator is created with `cmd/grant-operator`, from a machine with dir
 go run ./cmd/grant-operator -db "$DATABASE_URL" -email you@example.com
 go run ./cmd/grant-operator -db "$DATABASE_URL" -email you@example.com -revoke
 ```
+
+An existing operator can be invited as an admin or viewer with a single-use link. The command
+requires direct database access, does not send email, stores only a token hash, and expires the
+link after seven days. Creating another invitation for the same address invalidates its older
+unused link:
+
+```sh
+./csag admin invite --db "$DATABASE_URL" --console-url "https://console.example" \
+  --email "person@example.com" --role viewer
+```
+
+The recipient must already have an account in the consuming application, then sign in to the
+console with that same email address and accept the link. Use the Operators screen for owner
+initiated invitations; it also requires fresh passkey confirmation.
 
 Owner role changes and removals require a fresh WebAuthn assertion with user verification. Begin and finish return the browser ceremony options and then a short-lived grant; write calls present the grant in `X-CSAG-Operator-Grant`. It is bound to the owner, exact bearer token and operation, expires after 20 seconds and can be consumed once. The final owner cannot be demoted or removed. Passkeys must be configured with `WEBAUTHN_RP_ID`, `WEBAUTHN_RP_DISPLAY_NAME`, `WEBAUTHN_RP_ORIGINS` and `ENCRYPTION_KEY`.
 
