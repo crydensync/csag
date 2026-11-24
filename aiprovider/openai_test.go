@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestChatCompletionsUsesConfiguredBaseURLKeyAndModel(t *testing.T) {
@@ -36,6 +37,9 @@ func TestChatCompletionsUsesConfiguredBaseURLKeyAndModel(t *testing.T) {
 	provider, err := NewChatCompletions(ChatConfig{APIKey: "secret", BaseURL: server.URL + "/v1", Model: "model-x", MaxTokens: 1536, Temperature: 0.4})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if want := 60 * time.Second; provider.client.Timeout != want {
+		t.Fatalf("provider timeout = %s, want %s", provider.client.Timeout, want)
 	}
 	intent, err := provider.ParseQueryIntent(context.Background(), "count users")
 	if err != nil {

@@ -574,7 +574,7 @@ All three answer `404 not_configured` when `SETTINGS_ENCRYPTION_KEY` is unset â€
 
 ### LLM providers
 
-The API supports its Anthropic Messages adapter and a provider-neutral OpenAI-compatible chat-completions adapter. Configure the latter with a base URL, API key and model id. Any hosted or self-hosted service implementing that protocol can be used without adding a vendor-specific branch. A service using a different wire protocol needs an adapter. The model list action calls the compatible `/models` route; model identifiers can also be entered directly.
+The API supports its Anthropic Messages adapter and a provider-neutral OpenAI-compatible chat-completions adapter. Configure the latter with a base URL, API key and model id. Any hosted or self-hosted service implementing that protocol can be used without adding a vendor-specific branch. A service using a different wire protocol needs an adapter. Chat-completion requests have a 60-second deadline to allow slower hosted and free-tier providers to respond. The model list action calls the compatible `/models` route; model identifiers can also be entered directly.
 
 Provider settings include max tokens, temperature and a per-provider requests-per-minute limit. `POST .../test` makes a bounded test request without saving the supplied configuration. `GET .../usage` reports in-process request, success, failure, rate-limit and latency counters since the current process started; they reset on restart and are not billing or token counts. Credentials are sent to provider hosts only from the API process and never returned by these routes.
 

@@ -33,12 +33,14 @@ type ChatConfig struct {
 	Temperature float64
 }
 
+const chatCompletionsTimeout = 60 * time.Second
+
 func NewChatCompletions(cfg ChatConfig) (*ChatCompletions, error) {
 	if strings.TrimSpace(cfg.APIKey) == "" {
 		return nil, ErrNoAPIKey
 	}
 	return &ChatCompletions{
-		client:      &http.Client{Timeout: 30 * time.Second},
+		client:      &http.Client{Timeout: chatCompletionsTimeout},
 		model:       cfg.Model,
 		apiKey:      cfg.APIKey,
 		baseURL:     strings.TrimRight(cfg.BaseURL, "/"),
