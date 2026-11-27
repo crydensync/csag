@@ -125,6 +125,19 @@ The connection is opened with three pragmas, all of them load-bearing: `foreign_
 
 A clean stop is what closes that window: on `SIGTERM` or `SIGINT` the server stops accepting connections, waits up to 30 seconds for the requests already in flight, stops the webhook worker and digest scheduler, and closes the database which on SQLite is the checkpoint that folds the `-wal` file back into `csag.db` and removes the sidecar files. So `systemctl stop`, `docker stop` and Ctrl-C all leave a `csag.db` that is complete on its own. A `kill -9`, a crash or a power loss does not, which is why the paragraph above still stands.
 
+### Password policy settings
+
+`GET /v1/admin/settings/password-policy` reads the active policy and `PUT` replaces it. The write
+is persisted in the API settings table, applies immediately across instances, and is recorded as
+`password_policy_changed`. Signup, account password changes and admin-created accounts all check
+the live policy and return every stable CSAX Auth violation code.
+
+The policy may strengthen the engine defaults but cannot weaken them: minimum length is 8–72 bytes,
+maximum length is at least the minimum and at most 72 bytes. Composition checks are independently
+configurable. `PASSWORD_POLICY_*` environment variables provide the initial policy until an admin
+saves a runtime override. SQLite deployments keep env-configured policy, but the admin endpoints
+remain unavailable there with the rest of the admin surface.
+
 ## Migrations
 
 There is no migrate step in the setup instructions because there does not need to be one. Migrations are compiled into the binary and applied on boot, so a `git pull` or a new container image brings its own schema change with it.
@@ -259,6 +272,7 @@ GET    /v1/admin/security/mfa-adoption    (admin required)
 GET    /v1/admin/users                    (admin required)
 GET    /v1/admin/users/{userID}           (admin required)
 GET    /v1/admin/users/{userID}/metadata  (admin required)
+GET    /v1/admin/operators               (admin required, live roster)
 PUT    /v1/admin/users/{userID}/metadata/{key}     (admin required)
 DELETE /v1/admin/users/{userID}/metadata/{key}     (admin required)
 GET    /v1/admin/anomalies                (admin required)
@@ -471,15 +485,15 @@ Retries use exponential backoff (30s doubling, capped at 30m) up to `WEBHOOK_MAX
 
 ## Cloud logging and shipped events
 
-`CLOUD_LOGGING` composes a second, redacted, filtered copy of the engine's log records alongside the full-detail JSON line on stdout, in exactly the shape cryden's `logger` package doc prescribes:
+Postgres deployments compose a second, redacted copy of the engine's log records alongside the full-detail JSON line on stdout:
 
 ```go
 logger.NewMultiLogger(
     logger.NewConsoleJSONLogger(),                 // full detail, stays on stdout
-    logger.NewLevelFilter(                         // and the copy that leaves
-        logger.NewMaskingRedactor(shipSink),       // without the personal data
-        cfg.LogLevel,
-    ),
+    &shiplog.RuntimeLogger{                        // applies current enable + level settings
+        Runtime: runtime,
+        Sink: logger.NewMaskingRedactor(shipSink), // after removing personal data
+    },
 )
 ```
 
@@ -541,6 +555,9 @@ The AI-assisted admin features need two things only this repo can supply, becaus
 
 ```
 GET|PUT|DELETE /v1/admin/settings/llm-provider
+POST /v1/admin/settings/llm-provider/test
+POST /v1/admin/settings/llm-provider/models
+GET /v1/admin/settings/llm-provider/usage
 GET|PUT|DELETE /v1/admin/settings/database-provider
 GET|PUT|DELETE /v1/admin/settings/ask-ai-widget
 ```
@@ -548,6 +565,12 @@ GET|PUT|DELETE /v1/admin/settings/ask-ai-widget
 These are one of the admin surface's three write blocks, and they are the other half of the read-only rule rather than a hole in it. A tuning suggestion pre-fills one of these forms; an operator presses save; this is what handles that save. No AI-assisted handler in this repo holds a reference to any of them, and none accepts a suggestion as input.
 
 All three answer `404 not_configured` when `SETTINGS_ENCRYPTION_KEY` is unset without a key there is nowhere safe to put a credential, so the API refuses rather than storing one in the clear.
+
+### LLM providers
+
+The API supports its Anthropic Messages adapter and a provider-neutral OpenAI-compatible chat-completions adapter. Configure the latter with a base URL, API key and model id. Any hosted or self-hosted service implementing that protocol can be used without adding a vendor-specific branch. A service using a different wire protocol needs an adapter. The model list action calls the compatible `/models` route; model identifiers can also be entered directly.
+
+Provider settings include max tokens, temperature and a per-provider requests-per-minute limit. `POST .../test` makes a bounded test request without saving the supplied configuration. `GET .../usage` reports in-process request, success, failure, rate-limit and latency counters since the current process started; they reset on restart and are not billing or token counts. Credentials are sent to provider hosts only from the API process and never returned by these routes.
 
 ### Credentials
 

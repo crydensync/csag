@@ -4,10 +4,13 @@ import (
 	"net/http"
 
 	"github.com/crydensync/cryden/v2"
+
+	"github.com/crydensync/api/passwordpolicy"
 )
 
 type AuthHandlers struct {
-	Engine *cryden.Engine
+	Engine         *cryden.Engine
+	PasswordPolicy *passwordpolicy.Manager
 }
 
 func (h *AuthHandlers) SignUp(w http.ResponseWriter, r *http.Request) {
@@ -17,6 +20,10 @@ func (h *AuthHandlers) SignUp(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeBadRequest(w, "invalid request body")
+		return
+	}
+
+	if !enforcePasswordPolicy(w, r, h.PasswordPolicy, req.Password) {
 		return
 	}
 

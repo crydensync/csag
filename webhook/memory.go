@@ -59,6 +59,8 @@ func (s *MemoryStore) Enqueue(_ context.Context, d Delivery) error {
 
 	s.next++
 	d.ID = s.next
+	d.DestinationID = defaultDestination(d.DestinationID)
+	d.DestinationName = defaultDestinationName(d.DestinationName)
 	d.Status = StatusPending
 	d.Attempts = 0
 	d.ResponseCode = 0
@@ -169,12 +171,19 @@ func (s *MemoryStore) MarkFailed(_ context.Context, id int64, r Result, retryAt 
 }
 
 func (s *MemoryStore) List(_ context.Context, status Status, limit int) ([]Delivery, error) {
+	return s.ListDestination(context.Background(), status, "", limit)
+}
+
+func (s *MemoryStore) ListDestination(_ context.Context, status Status, destinationID string, limit int) ([]Delivery, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	out := make([]Delivery, 0, len(s.rows))
 	for _, d := range s.rows {
 		if status != "" && d.Status != status {
+			continue
+		}
+		if destinationID != "" && d.DestinationID != destinationID {
 			continue
 		}
 		out = append(out, copyDelivery(d))
@@ -191,6 +200,17 @@ func (s *MemoryStore) List(_ context.Context, status Status, limit int) ([]Deliv
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+func (s *MemoryStore) HasUnresolvedDestination(_ context.Context, destinationID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, d := range s.rows {
+		if d.DestinationID == destinationID && (d.Status == StatusPending || d.Status == StatusInFlight) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // Get returns one delivery by id, for a test that wants to assert on a row

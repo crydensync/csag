@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -276,7 +277,7 @@ func serve() {
 	// the router's handlers guard on exactly that check.
 	var webhookStore webhook.Store
 	var webhookWake chan struct{}
-	if cfg.WebhookURL != "" && !cfg.UsesSQLite() {
+	if (cfg.WebhookURL != "" || cfg.SettingsEncryptionKey != "") && !cfg.UsesSQLite() {
 		webhookStore = webhook.NewStore(db)
 		// Capacity 1, used purely as a nudge: the sender's job is to make
 		// the row and return, so a full channel must drop the hint rather
@@ -298,12 +299,13 @@ func serve() {
 	}
 
 	// Digest history: this repo's own table, written only by the scheduler
-	// below. Declared as the interface rather than as *digest.PostgresStore
+	// below. Constructed for every Postgres deployment so a schedule can
+	// be enabled at runtime. Declared as the interface rather than as *digest.PostgresStore
 	// for the same reason webhookStore is — a typed nil in a non-nil
 	// interface passes every nil check and then panics on use, and the
 	// router's handler guards on exactly that check.
 	var digestStore digest.Store
-	if cfg.DigestInterval > 0 && !cfg.UsesSQLite() {
+	if !cfg.UsesSQLite() {
 		digestStore = digest.NewStore(db)
 	}
 
@@ -322,8 +324,10 @@ func serve() {
 	// the key being *malformed* is fatal, and that is a configuration
 	// mistake worth refusing to boot on.
 	var settingsSecrets *settings.Secrets
+	var settingsStore settings.Store
 	if !cfg.UsesSQLite() {
-		settingsSecrets, err = settings.NewSecrets(settings.NewStore(db), cfg.SettingsEncryptionKey)
+		settingsStore = settings.NewStore(db)
+		settingsSecrets, err = settings.NewSecrets(settingsStore, cfg.SettingsEncryptionKey)
 		if err != nil {
 			log.Fatalf("invalid SETTINGS_ENCRYPTION_KEY: %v", err)
 		}
@@ -331,7 +335,38 @@ func serve() {
 			log.Printf("AI settings endpoints enabled (llm-provider, database-provider)")
 		}
 	}
+	digestScheduleFallback := digest.DefaultScheduleSettings()
+	if cfg.DigestInterval > 0 {
+		digestScheduleFallback.Enabled = true
+		digestScheduleFallback.IntervalHours = int(cfg.DigestInterval / time.Hour)
+	}
+	digestSchedule, err := digest.NewRuntime(context.Background(), settingsStore, digestScheduleFallback)
+	if err != nil {
+		log.Fatalf("digest schedule settings: %v", err)
+	}
+	activePasswordPolicy, err := passwordpolicy.NewManager(context.Background(), settingsStore, cfg.PasswordPolicy)
+	if err != nil {
+		log.Fatalf("password policy: %v", err)
+	}
 
+	var shippedLog shiplog.Store
+	var loggingRuntime *shiplog.Runtime
+	if !cfg.UsesSQLite() {
+		shippedLog = shiplog.NewStore(db)
+		loggingRuntime, err = shiplog.NewRuntime(context.Background(), settingsStore, shiplog.RuntimeSettings{
+			Enabled:  cfg.CloudLogging,
+			MinLevel: cfg.LogLevel.String(),
+		})
+		if err != nil {
+			log.Fatalf("cloud logging settings: %v", err)
+		}
+	}
+
+	globalClaims := jwtClaimsProvider(operators, metadata, users, settingsStore)
+	var claimsProvider token.ClaimsProvider
+	if globalClaims != nil {
+		claimsProvider = globalClaims
+	}
 	engineCfg := cryden.Config{
 		JWTSecret:       cfg.JWTSecret,
 		Users:           users,
@@ -362,7 +397,7 @@ func serve() {
 		// That is the price of claims that are current rather than
 		// frozen at signup, and it is why the engine calls a claims
 		// provider on the hot path only when a host asks it to.
-		AccessTokenClaims: claimsProvider(operators, metadata),
+		AccessTokenClaims: claimsProvider,
 	}
 
 	// Password hashing. Leaving Hasher unset is what selects bcrypt — the
@@ -486,14 +521,47 @@ func serve() {
 	// events worth waking someone for and excludes
 	// login_success/login_failed/token_rotated, the three that fire
 	// constantly and say nothing.
+	readWebhookEndpoints := func() map[string]settings.WebhookEndpointConfig {
+		if settingsSecrets == nil || !settingsSecrets.Configured() {
+			return nil
+		}
+		items, err := settings.RuntimeWebhookEndpoints(context.Background(), settingsSecrets)
+		if err != nil {
+			log.Printf("webhook configuration could not be read: %v", err)
+			return nil
+		}
+		return items
+	}
 	if webhookStore != nil {
-		engineCfg.Webhooks = &webhook.Sender{Store: webhookStore, Wake: webhookWake}
+		engineCfg.Webhooks = &webhook.Sender{
+			Store: webhookStore,
+			Wake:  webhookWake,
+			Destinations: func() []webhook.Destination {
+				items := readWebhookEndpoints()
+				if len(items) == 0 {
+					if cfg.WebhookURL != "" {
+						return []webhook.Destination{{ID: "environment", Name: "Environment default"}}
+					}
+					return nil
+				}
+				ids := make([]string, 0, len(items))
+				for id := range items {
+					ids = append(ids, id)
+				}
+				sort.Strings(ids)
+				out := make([]webhook.Destination, 0, len(ids))
+				for _, id := range ids {
+					out = append(out, webhook.Destination{ID: id, Name: items[id].Name})
+				}
+				return out
+			},
+		}
 		engineCfg.WebhookEvents = cfg.WebhookEvents
 	}
 
-	// Cloud logging. Off by default, and off means Config.Logger stays nil
-	// and the engine keeps its own console default — there is nothing to
-	// configure for a deployment that ships no logs anywhere.
+	// The local shipped log archive can be switched and level-filtered at
+	// runtime. The actual redaction mode remains deployment configuration,
+	// so its hashing key never enters the admin settings surface.
 	//
 	// The composition is the one cryden's own logger package doc
 	// prescribes, and the nesting is the whole point: the console logger
@@ -501,11 +569,9 @@ func serve() {
 	// through the level filter and the redactor first, so only it loses
 	// the IP address that makes an incident debuggable. Wrapping the
 	// fan-out in the redactor instead would strip both copies.
-	var shippedLog shiplog.Store
-	if cfg.CloudLogging && !cfg.UsesSQLite() {
-		shipped := shiplog.NewLogger(shiplog.NewStore(db))
+	if !cfg.UsesSQLite() {
+		shipped := shiplog.NewLogger(shippedLog)
 		shipped.Errors = log.Default()
-		shippedLog = shipped.Store
 
 		var redacted logger.Logger
 		if cfg.CloudLogRedaction == config.CloudLogRedactionHash {
@@ -525,10 +591,10 @@ func serve() {
 
 		engineCfg.Logger = logger.NewMultiLogger(
 			logger.NewConsoleJSONLogger(),
-			logger.NewLevelFilter(redacted, cfg.LogLevel),
+			&shiplog.RuntimeLogger{Runtime: loggingRuntime, Sink: redacted},
 		)
-		log.Printf("cloud logging enabled: records at %s and above are redacted (%s) and recorded in shipped_log_events",
-			cfg.LogLevel, cfg.CloudLogRedaction)
+		log.Printf("cloud logging settings loaded: enabled=%t minimum=%s redaction=%s",
+			loggingRuntime.Snapshot().Enabled, loggingRuntime.Snapshot().MinLevel, cfg.CloudLogRedaction)
 	}
 
 	engine, err := cryden.New(engineCfg)
@@ -546,6 +612,19 @@ func serve() {
 	// what the stale reclaim exists for — see RunOnce's own note.
 	if webhookStore != nil {
 		worker := webhook.NewWorker(webhookStore, cfg.WebhookURL, cfg.WebhookSecret)
+		worker.Destination = func(id string) (string, string) {
+			if id == "environment" {
+				return cfg.WebhookURL, cfg.WebhookSecret
+			}
+			items := readWebhookEndpoints()
+			if endpoint, ok := items[id]; ok {
+				return endpoint.URL, endpoint.Secret
+			}
+			if id == "default" {
+				return cfg.WebhookURL, cfg.WebhookSecret
+			}
+			return "", ""
+		}
 		worker.MaxAttempts = cfg.WebhookMaxAttempts
 		worker.Wake = webhookWake
 		worker.Log = log.Default()
@@ -561,9 +640,9 @@ func serve() {
 		log.Printf("webhook deliveries enabled: %d event types, up to %d attempts each", events, cfg.WebhookMaxAttempts)
 	}
 
-	// The digest schedule. Started only when DIGEST_INTERVAL_HOURS asked
-	// for one, so an unconfigured deployment runs no goroutine and writes
-	// no rows — the same shape as the webhook worker above.
+	// The digest scheduler runs on Postgres even while disabled, so an
+	// operator can change its schedule without restarting the API. A
+	// disabled schedule computes no reports and writes no rows.
 	//
 	// The builder closes over the engine rather than this package taking
 	// one: the report itself is cryden's (DigestSince), and digest's job is
@@ -577,9 +656,9 @@ func serve() {
 	// would be worse than no row.
 	if digestStore != nil {
 		scheduler := &digest.Scheduler{
-			Store:    digestStore,
-			Interval: cfg.DigestInterval,
-			Log:      log.Default(),
+			Store:            digestStore,
+			ScheduleProvider: digestSchedule.Snapshot,
+			Log:              log.Default(),
 			Build: func(ctx context.Context) (digest.Entry, error) {
 				since := time.Now().Add(-admin.DefaultDigestWindow)
 				text, err := cryden.DigestSince(ctx, engine, since)
@@ -594,7 +673,9 @@ func serve() {
 			},
 		}
 		workers.Go(func() { scheduler.Run(appCtx) })
-		log.Printf("scheduled digests enabled: one every %s", cfg.DigestInterval)
+		if schedule := digestSchedule.Snapshot(); schedule.Enabled {
+			log.Printf("scheduled digests enabled: %s at %s (%s)", schedule.DayOfWeek, schedule.Time, schedule.Timezone)
+		}
 	}
 
 	// Hoisted out of the Deps literal below because the teardown closes it:
@@ -604,13 +685,15 @@ func serve() {
 	askAI := askai.New(settingsSecrets)
 
 	router := httpapi.NewRouter(httpapi.Deps{
-		Engine: engine,
-		DB:     db,
-		Config: cfg,
-		Audit:  audit,
-		Users:  users,
-		Meta:   metadata,
-		Hooks:  webhookStore,
+		Engine:      engine,
+		Operators:   st.operators,
+		DB:          db,
+		Config:      cfg,
+		Audit:       audit,
+		Users:       users,
+		Meta:        metadata,
+		Hooks:       webhookStore,
+		WebhookWake: webhookWake,
 
 		Sessions: sessions,
 
@@ -621,11 +704,21 @@ func serve() {
 		OAuth: st.oauth,
 		TOTP:  st.totp,
 
-		Shipped: shippedLog,
+		Shipped:    shippedLog,
+		LogRuntime: loggingRuntime,
 
-		Digests: digestStore,
+		Digests:        digestStore,
+		DigestSchedule: digestSchedule,
 
-		Settings: settingsSecrets,
+		// The loaded email templates, nil when EMAIL_TEMPLATE_DIR was not
+		// set (the senders then print their built-in lines). The template
+		// status endpoint reports configured:false in that case rather
+		// than failing; see httpapi.Deps.Templates.
+		Templates: emailTemplates,
+
+		Settings:       settingsSecrets,
+		JWTClaims:      globalClaims,
+		PasswordPolicy: activePasswordPolicy,
 
 		Reviews: reviews,
 
@@ -783,6 +876,16 @@ func claimsProvider(operators *operator.Store, metadata *usermeta.PostgresStore)
 		return nil
 	}
 	return usermeta.ClaimsProvider(metadata, operators)
+}
+
+// jwtClaimsProvider layers runtime global mappings onto the existing per-user
+// metadata and operator-role claims. The settings key is also what gates the
+// admin editor; without it, the provider behaves exactly as before.
+func jwtClaimsProvider(operators *operator.Store, metadata *usermeta.PostgresStore, users store.UserStore, configStore settings.Store) *jwtclaims.Provider {
+	if operators == nil && metadata == nil {
+		return nil
+	}
+	return &jwtclaims.Provider{Users: users, Metadata: metadata, Operators: operators, Store: configStore}
 }
 
 // stores is every engine store for whichever backend this deployment runs

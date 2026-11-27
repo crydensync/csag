@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/crydensync/cryden/v2"
+
+	"github.com/crydensync/api/passwordpolicy"
 	"github.com/crydensync/cryden/v2/store"
 )
 
@@ -37,11 +39,12 @@ type UserActionHandlers struct {
 	// instances main.go handed cryden, for the reason httpapi.Deps
 	// gives: an action against a second store object is a change to
 	// different data than the engine would act on.
-	Users    store.UserStore
-	Sessions store.SessionStore
-	Audit    store.AuditStore
-	OAuth    store.OAuthStore
-	TOTP     store.TOTPStore
+	Users          store.UserStore
+	Sessions       store.SessionStore
+	Audit          store.AuditStore
+	OAuth          store.OAuthStore
+	TOTP           store.TOTPStore
+	PasswordPolicy *passwordpolicy.Manager
 }
 
 // The audit event types this surface records for its own actions. The
@@ -153,6 +156,10 @@ func (h *UserActionHandlers) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Email == "" || body.Password == "" {
 		writeBadRequest(w, "email and password are both required")
+		return
+	}
+
+	if !enforcePasswordPolicy(w, r, h.PasswordPolicy, body.Password) {
 		return
 	}
 

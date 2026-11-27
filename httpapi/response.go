@@ -49,6 +49,12 @@ func writeBadRequest(w http.ResponseWriter, message string) {
 	})
 }
 
+func writeConflict(w http.ResponseWriter, code, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": code, "message": message}})
+}
+
 func decodeJSON(r *http.Request, v any) error {
 	return json.NewDecoder(r.Body).Decode(v)
 }

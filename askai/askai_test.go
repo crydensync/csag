@@ -29,8 +29,11 @@ const allowedOrigin = "https://console.example.com"
 // test says the model produced — including one that names somebody else,
 // which is the case that matters.
 type fakeProvider struct {
-	intent crydenai.QueryIntent
-	err    error
+	intent           crydenai.QueryIntent
+	err              error
+	composedQuestion string
+	composedResult   crydenai.QueryResult
+	answer           string
 }
 
 func (p *fakeProvider) ParseQueryIntent(_ context.Context, _ string) (crydenai.QueryIntent, error) {
@@ -38,6 +41,12 @@ func (p *fakeProvider) ParseQueryIntent(_ context.Context, _ string) (crydenai.Q
 		return crydenai.QueryIntent{}, p.err
 	}
 	return p.intent, nil
+}
+
+func (p *fakeProvider) ComposeAnswer(_ context.Context, question string, result crydenai.QueryResult) (string, error) {
+	p.composedQuestion = question
+	p.composedResult = result
+	return p.answer, nil
 }
 
 // fakeStore records what actually reached the query surface. In
@@ -190,6 +199,77 @@ func (f *fixture) configure() {
 	f.putLLMConfig(testLLMConfig())
 	f.putDBConfig(testDBConfig())
 	f.putWidgetConfig(testWidgetConfig())
+}
+
+func TestAdminAuditRequiresTheAuditEntityBeforeQueryExecution(t *testing.T) {
+	f := newFixture(t)
+	f.configure()
+	f.provider.intent = crydenai.QueryIntent{Entity: "users"}
+
+	if _, err := f.service.AdminAudit(context.Background(), "how many accounts are locked"); !errors.Is(err, crydenai.ErrUnsafeQueryIntent) {
+		t.Fatalf("AdminAudit error = %v, want ErrUnsafeQueryIntent", err)
+	}
+	if got := f.store.count(); got != 0 {
+		t.Fatalf("query store saw %d intents, want none", got)
+	}
+}
+
+func TestAdminAuditRunsTheValidatedAuditQuery(t *testing.T) {
+	f := newFixture(t)
+	f.configure()
+	f.provider.intent = crydenai.QueryIntent{Entity: "audit_events", Limit: 10}
+	f.store.result = crydenai.QueryResult{Columns: []string{"type"}, Rows: [][]string{{"login_failed"}}}
+
+	got, err := f.service.AdminAudit(context.Background(), "show recent failed logins")
+	if err != nil {
+		t.Fatalf("AdminAudit: %v", err)
+	}
+	if got.Entity != "audit_events" || got.RowCount != 1 || got.Rows[0][0] != "login_failed" {
+		t.Fatalf("AdminAudit result = %+v", got)
+	}
+	if intent := f.store.last(t); intent.Entity != "audit_events" {
+		t.Fatalf("query entity = %q, want audit_events", intent.Entity)
+	}
+}
+
+func TestAdminAskComposesOnlyTheValidatedQueryResultAndAddsItsCitation(t *testing.T) {
+	f := newFixture(t)
+	f.configure()
+	f.provider.intent = crydenai.QueryIntent{Entity: "sessions", Limit: 10}
+	f.store.result = crydenai.QueryResult{Columns: []string{"id"}, Rows: [][]string{{"session-1"}, {"session-2"}}}
+	f.provider.answer = "Two sessions were found."
+
+	got, err := f.service.AdminAsk(context.Background(), "how many sessions exist")
+	if err != nil {
+		t.Fatalf("AdminAsk: %v", err)
+	}
+	if got.Answer != f.provider.answer || got.SourceEntity != "sessions" || got.RowCount != 2 {
+		t.Fatalf("AdminAsk result = %+v", got)
+	}
+	if f.provider.composedQuestion != "how many sessions exist" {
+		t.Errorf("composed question = %q", f.provider.composedQuestion)
+	}
+	if len(f.provider.composedResult.Rows) != 2 {
+		t.Errorf("composer received %d rows, want 2", len(f.provider.composedResult.Rows))
+	}
+}
+
+func TestAdminAskWithNoRowsAvoidsASecondModelCall(t *testing.T) {
+	f := newFixture(t)
+	f.configure()
+	f.provider.intent = crydenai.QueryIntent{Entity: "users", Limit: 10}
+	f.store.result = crydenai.QueryResult{Columns: []string{"id"}}
+
+	got, err := f.service.AdminAsk(context.Background(), "find an account that does not exist")
+	if err != nil {
+		t.Fatalf("AdminAsk: %v", err)
+	}
+	if got.Answer != "No rows matched the question." || got.RowCount != 0 {
+		t.Fatalf("AdminAsk result = %+v", got)
+	}
+	if f.provider.composedQuestion != "" {
+		t.Errorf("composer was called for an empty result: %q", f.provider.composedQuestion)
+	}
 }
 
 func (f *fixture) ask(question string) (widget.Answer, error) {

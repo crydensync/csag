@@ -63,6 +63,11 @@ var (
 	// deployment fault, so both are one 400 with the reason in the
 	// message rather than two codes nothing would branch on.
 	ErrInvalidQuestion = errors.New("askai: invalid question")
+
+	// ErrComposerUnavailable means the configured LLM provider can parse
+	// safe query intents but does not implement the optional answer
+	// composer required by the summary modes.
+	ErrComposerUnavailable = errors.New("askai: the configured provider cannot compose answers")
 )
 
 // Service answers widget questions. It holds no state of its own beyond
@@ -84,8 +89,9 @@ type Service struct {
 
 	// mu guards current. Held across a rebuild, which is cheap by
 	// design — see build.
-	mu      sync.Mutex
-	current *built
+	mu           sync.Mutex
+	current      *built
+	adminCurrent *built
 }
 
 // Providers builds the pair cryden's widget.Config needs from a stored
@@ -95,10 +101,10 @@ type Service struct {
 // scope check is build's job, not the factory's, so replacing this still
 // exercises the real scope enforcement.
 //
-// The default is the Anthropic provider over the stored credential and
-// the Postgres snapshot over the stored read-only connection. A host
-// that wants a different LLM backend supplies its own, and so does a
-// test that needs to see what reached the query surface.
+// The default is the configured provider adapter over the stored credential
+// and the Postgres snapshot over the stored read-only connection. A host
+// that uses a different wire protocol supplies its own adapter, and so does
+// a test that needs to see what reached the query surface.
 type Providers func(
 	llm settings.LLMProviderConfig,
 	db settings.DatabaseProviderConfig,
@@ -108,11 +114,7 @@ type Providers func(
 // over the stored credential, and the snapshot over the stored read-only
 // connection.
 func defaultProviders(llm settings.LLMProviderConfig, db settings.DatabaseProviderConfig) (crydenai.LLMProvider, crydenai.QueryableStore, io.Closer, error) {
-	provider, err := aiprovider.NewAnthropic(aiprovider.AnthropicConfig{
-		APIKey:    llm.APIKey,
-		Model:     llm.Model,
-		MaxTokens: llm.MaxTokens,
-	})
+	provider, err := aiprovider.NewLLM(llm)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -244,6 +246,181 @@ func (s *Service) Ask(ctx context.Context, req Request) (widget.Answer, error) {
 	}, req.OwnerUserID, req.Question)
 }
 
+// AdminQuery runs an operator question through cryden's allowlisted,
+// read-only query-intent pipeline. The caller must be authenticated as admin.
+func (s *Service) AdminQuery(ctx context.Context, question string) (AdminQueryResult, error) {
+	if strings.TrimSpace(question) == "" || len(question) > maxQuestionLength {
+		return AdminQueryResult{}, fmt.Errorf("%w: question must contain 1-%d characters", ErrInvalidQuestion, maxQuestionLength)
+	}
+	llmRaw, err := s.secrets.Get(ctx, settings.KeyLLMProvider)
+	if errors.Is(err, settings.ErrNotFound) {
+		return AdminQueryResult{}, ErrNotConfigured
+	}
+	if err != nil {
+		return AdminQueryResult{}, err
+	}
+	dbRaw, err := s.secrets.Get(ctx, settings.KeyDatabaseProvider)
+	if errors.Is(err, settings.ErrNotFound) {
+		return AdminQueryResult{}, ErrNotConfigured
+	}
+	if err != nil {
+		return AdminQueryResult{}, err
+	}
+	ready, err := s.buildAdmin(llmRaw, dbRaw)
+	if err != nil {
+		return AdminQueryResult{}, err
+	}
+	intent, err := ready.provider.ParseQueryIntent(ctx, question)
+	if err != nil {
+		return AdminQueryResult{}, err
+	}
+	result, err := crydenai.ExecuteIntent(ctx, ready.store, intent)
+	if err != nil {
+		return AdminQueryResult{}, err
+	}
+	return AdminQueryResult{Entity: intent.Entity, Columns: result.Columns, Rows: result.Rows, RowCount: len(result.Rows)}, nil
+}
+
+// AdminAudit runs a natural-language question through the same allowlisted
+// query path as AdminQuery, and requires the resulting intent to stay on the
+// audit_events entity. This mode cannot broaden an audit question into a user
+// or session query.
+func (s *Service) AdminAudit(ctx context.Context, question string) (AdminQueryResult, error) {
+	if strings.TrimSpace(question) == "" || len(question) > maxQuestionLength {
+		return AdminQueryResult{}, fmt.Errorf("%w: question must contain 1-%d characters", ErrInvalidQuestion, maxQuestionLength)
+	}
+	ready, err := s.adminProviders(ctx)
+	if err != nil {
+		return AdminQueryResult{}, err
+	}
+	intent, err := ready.provider.ParseQueryIntent(ctx, question)
+	if err != nil {
+		return AdminQueryResult{}, err
+	}
+	if intent.Entity != "audit_events" {
+		return AdminQueryResult{}, crydenai.ErrUnsafeQueryIntent
+	}
+	result, err := crydenai.ExecuteIntent(ctx, ready.store, intent)
+	if err != nil {
+		return AdminQueryResult{}, err
+	}
+	return AdminQueryResult{Entity: intent.Entity, Columns: result.Columns, Rows: result.Rows, RowCount: len(result.Rows)}, nil
+}
+
+// AdminAsk composes a plain-language answer from rows produced by the existing
+// validated, read-only admin query pipeline. The model receives no store or
+// write-capable dependency.
+func (s *Service) AdminAsk(ctx context.Context, question string) (AdminAIAnswer, error) {
+	query, err := s.AdminQuery(ctx, question)
+	if err != nil {
+		return AdminAIAnswer{}, err
+	}
+	return s.ComposeAdminAnswer(ctx, question, query.Entity, crydenai.QueryResult{
+		Columns: query.Columns,
+		Rows:    query.Rows,
+	})
+}
+
+// ComposeAdminAnswer gives the provider only a question and an already-read
+// result. SourceEntity and RowCount are set by code so the model cannot author
+// its own citation.
+func (s *Service) ComposeAdminAnswer(ctx context.Context, question, sourceEntity string, result crydenai.QueryResult) (AdminAIAnswer, error) {
+	if strings.TrimSpace(question) == "" || len(question) > maxQuestionLength {
+		return AdminAIAnswer{}, fmt.Errorf("%w: question must contain 1-%d characters", ErrInvalidQuestion, maxQuestionLength)
+	}
+	if len(result.Rows) == 0 {
+		return AdminAIAnswer{
+			Answer:       "No rows matched the question.",
+			SourceEntity: sourceEntity,
+			RowCount:     0,
+		}, nil
+	}
+	ready, err := s.adminProviders(ctx)
+	if err != nil {
+		return AdminAIAnswer{}, err
+	}
+	composer, ok := ready.provider.(interface {
+		ComposeAnswer(context.Context, string, crydenai.QueryResult) (string, error)
+	})
+	if !ok {
+		return AdminAIAnswer{}, ErrComposerUnavailable
+	}
+	answer, err := composer.ComposeAnswer(ctx, question, result)
+	if err != nil {
+		return AdminAIAnswer{}, err
+	}
+	return AdminAIAnswer{
+		Answer:       answer,
+		SourceEntity: sourceEntity,
+		RowCount:     len(result.Rows),
+	}, nil
+}
+
+func (s *Service) adminProviders(ctx context.Context) (*built, error) {
+	llmRaw, err := s.secrets.Get(ctx, settings.KeyLLMProvider)
+	if errors.Is(err, settings.ErrNotFound) {
+		return nil, ErrNotConfigured
+	}
+	if err != nil {
+		return nil, err
+	}
+	dbRaw, err := s.secrets.Get(ctx, settings.KeyDatabaseProvider)
+	if errors.Is(err, settings.ErrNotFound) {
+		return nil, ErrNotConfigured
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s.buildAdmin(llmRaw, dbRaw)
+}
+
+type AdminQueryResult struct {
+	Entity   string     `json:"entity"`
+	Columns  []string   `json:"columns"`
+	Rows     [][]string `json:"rows"`
+	RowCount int        `json:"row_count"`
+}
+
+// AdminAIAnswer carries a model-written summary and its server-generated
+// source citation. The model never supplies SourceEntity or RowCount.
+type AdminAIAnswer struct {
+	Answer       string `json:"answer"`
+	SourceEntity string `json:"source_entity"`
+	RowCount     int    `json:"row_count"`
+	Since        string `json:"since,omitempty"`
+}
+
+func (s *Service) buildAdmin(llmRaw, dbRaw []byte) (*built, error) {
+	fingerprint := fingerprint(llmRaw, dbRaw, []string{"admin"})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.adminCurrent != nil && s.adminCurrent.fingerprint == fingerprint {
+		return s.adminCurrent, nil
+	}
+	llmConfig, err := settings.UnmarshalLLMProvider(llmRaw)
+	if err != nil {
+		return nil, err
+	}
+	dbConfig, err := settings.UnmarshalDatabaseProvider(dbRaw)
+	if err != nil {
+		return nil, err
+	}
+	build := s.providers
+	if build == nil {
+		build = defaultProviders
+	}
+	provider, store, closer, err := build(llmConfig, dbConfig)
+	if err != nil {
+		return nil, err
+	}
+	next := &built{fingerprint: fingerprint, provider: provider, store: store, closer: closer}
+	if s.adminCurrent != nil && s.adminCurrent.closer != nil {
+		_ = s.adminCurrent.closer.Close()
+	}
+	s.adminCurrent = next
+	return next, nil
+}
+
 // Close releases the connection pool behind the cached providers. The
 // cached pair is replaced and closed on every rebuild, so this is only
 // about the last one — main.go calls it during shutdown, after the server
@@ -252,14 +429,17 @@ func (s *Service) Ask(ctx context.Context, req Request) (widget.Answer, error) {
 func (s *Service) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.current == nil {
-		return nil
-	}
 	var err error
-	if s.current.closer != nil {
+	if s.current != nil && s.current.closer != nil {
 		err = s.current.closer.Close()
 	}
 	s.current = nil
+	if s.adminCurrent != nil && s.adminCurrent.closer != nil {
+		if closeErr := s.adminCurrent.closer.Close(); err == nil {
+			err = closeErr
+		}
+	}
+	s.adminCurrent = nil
 	return err
 }
 

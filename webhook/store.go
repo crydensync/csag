@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -103,6 +104,10 @@ type Delivery struct {
 	// EventType is the recorded store.AuditEventType as a string, so this
 	// package needs no import from the engine's internals.
 	EventType string
+	// DestinationID and DestinationName snapshot the target selected when
+	// this event was queued. They remain after an endpoint is removed.
+	DestinationID   string
+	DestinationName string
 
 	// UserID and IP are empty where the event had neither.
 	UserID string
@@ -187,6 +192,8 @@ type Store interface {
 	// List returns deliveries newest first. An empty status means all of
 	// them.
 	List(ctx context.Context, status Status, limit int) ([]Delivery, error)
+	ListDestination(ctx context.Context, status Status, destinationID string, limit int) ([]Delivery, error)
+	HasUnresolvedDestination(ctx context.Context, destinationID string) (bool, error)
 }
 
 // PostgresStore is the real store, on the same *sql.DB every other store in
@@ -204,7 +211,7 @@ var _ Store = (*PostgresStore)(nil)
 // deliveryColumns is the select list and scan order, written once so the
 // three reads below cannot drift apart from each other.
 const deliveryColumns = `
-	id, event_id, event_type, COALESCE(user_id::text, ''), COALESCE(ip, ''),
+	id, event_id, event_type, destination_id, destination_name, COALESCE(user_id::text, ''), COALESCE(ip, ''),
 	payload, status, attempts, COALESCE(response_code, 0), COALESCE(error, ''),
 	COALESCE(duration_ms, 0), created_at, next_attempt_at, claimed_at, delivered_at
 `
@@ -217,7 +224,7 @@ const deliveryColumns = `
 func scanDelivery(row interface{ Scan(...any) error }) (Delivery, error) {
 	var d Delivery
 	err := row.Scan(
-		&d.ID, &d.EventID, &d.EventType, &d.UserID, &d.IP,
+		&d.ID, &d.EventID, &d.EventType, &d.DestinationID, &d.DestinationName, &d.UserID, &d.IP,
 		&d.Payload, &d.Status, &d.Attempts, &d.ResponseCode, &d.Error,
 		&d.DurationMS, &d.CreatedAt, &d.NextAttemptAt, &d.ClaimedAt, &d.DeliveredAt,
 	)
@@ -236,9 +243,9 @@ func (s *PostgresStore) Enqueue(ctx context.Context, d Delivery) error {
 	// empty user id is a real case: a failed login naming an email nobody
 	// registered has no user behind it.
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO webhook_deliveries (event_id, event_type, user_id, ip, payload)
-		VALUES ($1, $2, $3, $4, $5)
-	`, d.EventID, d.EventType, nullIfEmpty(d.UserID), nullIfEmpty(d.IP), string(d.Payload))
+		INSERT INTO webhook_deliveries (event_id, event_type, destination_id, destination_name, user_id, ip, payload)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`, d.EventID, d.EventType, defaultDestination(d.DestinationID), defaultDestinationName(d.DestinationName), nullIfEmpty(d.UserID), nullIfEmpty(d.IP), string(d.Payload))
 	return err
 }
 
@@ -326,17 +333,26 @@ func (s *PostgresStore) MarkFailed(ctx context.Context, id int64, r Result, retr
 }
 
 func (s *PostgresStore) List(ctx context.Context, status Status, limit int) ([]Delivery, error) {
+	return s.ListDestination(ctx, status, "", limit)
+}
+
+func (s *PostgresStore) ListDestination(ctx context.Context, status Status, destinationID string, limit int) ([]Delivery, error) {
 	query := `SELECT ` + deliveryColumns + ` FROM webhook_deliveries`
-	args := []any{limit}
+	conditions := make([]string, 0, 2)
+	args := make([]any, 0, 3)
 	if status != "" {
-		// Two statements rather than one with ($1 = '' OR status = $1), so
-		// the filtered form can use idx_webhook_deliveries_due instead of
-		// scanning the delivered history it is trying to exclude.
-		query += ` WHERE status = $1 ORDER BY created_at DESC, id DESC LIMIT $2`
-		args = []any{string(status), limit}
-	} else {
-		query += ` ORDER BY created_at DESC, id DESC LIMIT $1`
+		args = append(args, string(status))
+		conditions = append(conditions, fmt.Sprintf("status = $%d", len(args)))
 	}
+	if destinationID != "" {
+		args = append(args, destinationID)
+		conditions = append(conditions, fmt.Sprintf("destination_id = $%d", len(args)))
+	}
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	args = append(args, limit)
+	query += fmt.Sprintf(" ORDER BY created_at DESC, id DESC LIMIT $%d", len(args))
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -353,6 +369,25 @@ func (s *PostgresStore) List(ctx context.Context, status Status, limit int) ([]D
 		out = append(out, d)
 	}
 	return out, rows.Err()
+}
+
+func (s *PostgresStore) HasUnresolvedDestination(ctx context.Context, destinationID string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM webhook_deliveries WHERE destination_id = $1 AND status IN ('pending', 'in_flight'))`, destinationID).Scan(&exists)
+	return exists, err
+}
+
+func defaultDestination(id string) string {
+	if id == "" {
+		return "default"
+	}
+	return id
+}
+func defaultDestinationName(name string) string {
+	if name == "" {
+		return "Default"
+	}
+	return name
 }
 
 // mustHaveHit turns "the UPDATE matched no row" into ErrNotFound. A worker

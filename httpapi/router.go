@@ -35,8 +35,9 @@ type Deps struct {
 	// DB is used only by the health handler, which pings it. Nil is fine
 	// for a router built without a database (tests); /v1/health then
 	// reports the database as unconfigured rather than panicking.
-	DB     *sql.DB
-	Config config.Config
+	DB        *sql.DB
+	Config    config.Config
+	Operators *operator.Store
 
 	// Audit and Users back GET /v1/admin/security/hash-migration — cryden
 	// exposes no bulk way to inspect stored password hashes, so the
@@ -68,24 +69,25 @@ type Deps struct {
 	// there is nothing to report on in a deployment that dispatches no
 	// webhooks, and the handler answers 404 rather than an empty list an
 	// operator would read as "nothing has failed".
-	Hooks webhook.Store
+	Hooks       webhook.Store
+	WebhookWake chan<- struct{}
 
-	// Shipped backs the admin shipped-events log — the redacted copy of
-	// the engine's log records that the cloud sink was handed. Nil unless
-	// CLOUD_LOGGING is set, for the same reason Hooks is: with the sink
-	// off, nothing writes rows, and an empty list would be a lie about a
-	// deployment that ships nothing.
+	// Shipped backs the admin shipped-events log. Present on Postgres even
+	// when runtime shipping is disabled, so operators can inspect old rows
+	// and configure the sink in the same console.
 	Shipped shiplog.Store
+	// LogRuntime controls the local redacted archive; updates take effect
+	// immediately in the engine's logger.
+	LogRuntime *shiplog.Runtime
 
-	// Digests backs GET /v1/admin/digest/history. Nil unless
-	// DIGEST_INTERVAL_HOURS asked for a schedule: the table is only ever
-	// written by the scheduler, so with no schedule there is no history to
-	// read, and the handler answers 404 rather than an empty list an
-	// operator would read as "nothing has ever happened".
+	// Digests backs GET /v1/admin/digest/history. Present on Postgres so a
+	// schedule can be enabled at runtime; on SQLite the admin gate returns 501.
 	//
 	// The on-demand GET /v1/admin/digest needs nothing from here — it
 	// reads the engine's audit history and records nothing.
-	Digests digest.Store
+	Digests        digest.Store
+	DigestSchedule *digest.Runtime
+	DigestSender   digest.DeliverySender
 
 	// Settings backs the /v1/admin/settings/* endpoints: the LLM provider
 	// and the read-only database behind the AI-assisted admin features.
@@ -93,7 +95,11 @@ type Deps struct {
 	// nowhere safe to put a credential, so those endpoints answer 404
 	// not_configured rather than accepting one they would have to store in
 	// the clear. See settings.Secrets.
-	Settings *settings.Secrets
+	Settings  *settings.Secrets
+	JWTClaims *jwtclaims.Provider
+
+	// PasswordPolicy is the persistent, non-secret policy active on this API.
+	PasswordPolicy *passwordpolicy.Manager
 
 	// Reviews backs the flagged-event review queue. This repo's own table
 	// (migrations/014) and package — cryden records that a login tripped
@@ -108,16 +114,26 @@ type Deps struct {
 	// main.go built one; the handler then answers 404 rather than
 	// panicking.
 	AskAI *askai.Service
+
+	// Templates backs GET /v1/admin/settings/email-templates. Nil unless
+	// Templates backs GET /v1/admin/settings/email-templates. Nil unless
+	// EMAIL_TEMPLATE_DIR pointed at a loadable directory. With no
+	// templates configured the senders print their own built-in lines,
+	// and there is no rendered sample to report. The endpoint answers
+	// configured:false rather than an error: unconfigured is the state a
+	// deployment without the env var is legitimately in, not a fault.
+	Templates *templates.Set
 }
 
 // NewRouter builds the full route table. Called once from main.go.
 func NewRouter(d Deps) http.Handler {
 	engine := d.Engine
 
-	auth := &AuthHandlers{Engine: engine}
+	auth := &AuthHandlers{Engine: engine, PasswordPolicy: d.PasswordPolicy}
 	sessions := &SessionHandlers{Engine: engine}
-	account := &AccountHandlers{Engine: engine}
-	email := &EmailHandlers{Engine: engine}
+	account := &AccountHandlers{Engine: engine, PasswordPolicy: d.PasswordPolicy}
+	email := &EmailHandlers{Engine: engine, Audit: d.Audit}
+	emailTemplates := &EmailTemplatesHandlers{TemplateDir: d.Config.EmailTemplateDir, Templates: d.Templates}
 	health := &HealthHandler{DB: d.DB}
 	oauth := &OAuthHandlers{Engine: engine, Config: d.Config}
 	oauthHealth := NewOAuthHealthHandlers(oauth)
@@ -129,25 +145,34 @@ func NewRouter(d Deps) http.Handler {
 	security := &SecurityHandlers{Audit: d.Audit, Users: d.Users, Config: d.Config}
 	metadata := &MetadataHandlers{Users: d.Users, Meta: d.Meta}
 	users := &UserHandlers{Engine: engine, Users: d.Users, Sessions: d.Sessions, Audit: d.Audit}
-	userActions := &UserActionHandlers{Engine: engine, Users: d.Users, Sessions: d.Sessions, Audit: d.Audit, OAuth: d.OAuth, TOTP: d.TOTP}
-	hooks := &WebhookHandlers{Store: d.Hooks}
+	userActions := &UserActionHandlers{Engine: engine, Users: d.Users, Sessions: d.Sessions, Audit: d.Audit, OAuth: d.OAuth, TOTP: d.TOTP, PasswordPolicy: d.PasswordPolicy}
+	passwordPolicy := &PasswordPolicyHandlers{Policy: d.PasswordPolicy, Audit: d.Audit}
+	adminSessions := &AdminSessionHandlers{DB: d.DB, Engine: engine, Audit: d.Audit}
+	auditLog := &AdminAuditHandlers{DB: d.DB}
+	hooks := &WebhookHandlers{Store: d.Hooks, Secrets: d.Settings, Wake: d.WebhookWake}
 	logging := &LoggingHandlers{Store: d.Shipped}
+	loggingSettings := &LoggingSettingsHandlers{Runtime: d.LogRuntime, Redaction: d.Config.CloudLogRedaction, HashKeySet: d.Config.CloudLogHashKey != ""}
 	digests := &DigestHandlers{Engine: engine, Store: d.Digests}
+	digestSettings := &DigestSettingsHandlers{Runtime: d.DigestSchedule, Sender: d.DigestSender}
 	support := &SupportHandlers{Engine: engine}
 	tuning := &TuningHandlers{Audit: d.Audit, Config: d.Config}
 	aiSettings := &SettingsHandlers{Secrets: d.Settings}
+	jwtClaims := &JWTClaimHandlers{Provider: d.JWTClaims}
 	anomalies := &AnomalyHandlers{Audit: d.Audit, Reviews: d.Reviews}
 	askAI := &WidgetHandlers{Service: d.AskAI}
+	widgetRateLimiter := NewWidgetUserRateLimiter(d.Config.AskAIRateLimit, d.Config.AskAIRateLimitWindow)
+	adminAI := &AdminAIHandlers{Service: d.AskAI, LogReader: d.Shipped, Audit: d.Audit}
+	operatorHandlers := &OperatorHandlers{Store: d.Operators}
 	docs := NewDocsHandler()
 
 	// The gate for every route under /v1/admin, resolved once. On a
 	// Postgres deployment this is RequireAdmin; on a SQLite one it is a
 	// flat 501, because the console's tables are Postgres-only. Routing
-	// all 25 admin registrations through this one value is deliberate —
+	// every admin registration through this one value is deliberate —
 	// it is what makes "the whole admin console needs DATABASE_URL" a
 	// property of the router rather than a list to keep in sync. See
 	// AdminOnly.
-	adminOnly := AdminOnly(engine, d.Config)
+	adminOnly := AdminOnly(engine, d.Config, d.Operators)
 
 	mux := http.NewServeMux()
 
@@ -257,7 +282,7 @@ func NewRouter(d Deps) http.Handler {
 	// sits here among the authenticated routes rather than in the /v1/admin
 	// block below because an end user is not an operator and this is not an
 	// admin surface — see WidgetHandlers.
-	mux.HandleFunc("POST /v1/ask-ai", RequireAuth(engine, askAI.Ask))
+	mux.HandleFunc("POST /v1/ask-ai", RequireAuth(engine, WithWidgetUserRateLimit(widgetRateLimiter, askAI.Ask)))
 
 	// Admin endpoints. Everything under /v1/admin goes through adminOnly
 	// above — RequireAdmin on a Postgres deployment, which needs the `role`
@@ -276,6 +301,15 @@ func NewRouter(d Deps) http.Handler {
 	// reachable from an AI tool, which is what CLAUDE.md's hard rule
 	// actually protects. See README's note on the admin surface.
 	mux.HandleFunc("GET /v1/admin/oauth/health", adminOnly(oauthHealth.Health))
+	// The configured-provider list answers from configuration alone (no
+	// probe), and the per-provider test runs the health report's own probe
+	// against one provider on demand. Both serve the console's OAuth
+	// Providers screen; see oauth_providers.go for why the list exists at
+	// all when health already covers the same names.
+	mux.HandleFunc("GET /v1/admin/oauth/providers", adminOnly(oauthHealth.Providers))
+	mux.HandleFunc("POST /v1/admin/oauth/{provider}/test", adminOnly(func(w http.ResponseWriter, r *http.Request) {
+		oauthHealth.TestProvider(w, r, r.PathValue("provider"))
+	}))
 	mux.HandleFunc("GET /v1/admin/security/hash-migration", adminOnly(security.HashMigration))
 	// Second-factor enrolment, as the engine's own audit events against the
 	// user total. Reports events rather than users, and says so — cryden
@@ -298,6 +332,13 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("GET /v1/admin/users/{userID}", adminOnly(func(w http.ResponseWriter, r *http.Request) {
 		users.Detail(w, r, r.PathValue("userID"))
 	}))
+	mux.HandleFunc("GET /v1/admin/sessions", adminOnly(adminSessions.List))
+	mux.HandleFunc("DELETE /v1/admin/sessions/{sessionID}", adminOnly(func(w http.ResponseWriter, r *http.Request) {
+		adminSessions.Revoke(w, r, r.PathValue("sessionID"))
+	}))
+	mux.HandleFunc("POST /v1/admin/sessions/revoke-all", adminOnly(adminSessions.RevokeAll))
+	mux.HandleFunc("GET /v1/admin/audit", adminOnly(auditLog.List))
+	mux.HandleFunc("GET /v1/admin/operators", adminOnly(operatorHandlers.List))
 
 	// The account actions. Every one changes an account that is not the
 	// operator's, which is what kept this surface unwritten until the
@@ -345,6 +386,18 @@ func NewRouter(d Deps) http.Handler {
 	// endpoint here that re-queues or deletes a delivery, deliberately (see
 	// WebhookHandlers).
 	mux.HandleFunc("GET /v1/admin/webhooks/deliveries", adminOnly(hooks.Deliveries))
+	mux.HandleFunc("GET /v1/admin/webhooks", adminOnly(hooks.Endpoint))
+	mux.HandleFunc("PUT /v1/admin/webhooks", adminOnly(hooks.PutEndpoint))
+	mux.HandleFunc("DELETE /v1/admin/webhooks", adminOnly(hooks.DeleteEndpoint))
+	mux.HandleFunc("POST /v1/admin/webhooks/test", adminOnly(hooks.TestEndpoint))
+	mux.HandleFunc("GET /v1/admin/webhooks/endpoints", adminOnly(hooks.Endpoints))
+	mux.HandleFunc("POST /v1/admin/webhooks/endpoints", adminOnly(hooks.CreateEndpoint))
+	mux.HandleFunc("PUT /v1/admin/webhooks/endpoints/{endpointID}", adminOnly(hooks.UpdateEndpoint))
+	mux.HandleFunc("DELETE /v1/admin/webhooks/endpoints/{endpointID}", adminOnly(hooks.RemoveEndpoint))
+	mux.HandleFunc("POST /v1/admin/webhooks/endpoints/{endpointID}/test", adminOnly(hooks.TestDestination))
+	mux.HandleFunc("GET /v1/admin/settings/jwt-claims", adminOnly(jwtClaims.Read))
+	mux.HandleFunc("PUT /v1/admin/settings/jwt-claims", adminOnly(jwtClaims.Save))
+	mux.HandleFunc("POST /v1/admin/settings/jwt-claims/preview", adminOnly(jwtClaims.Preview))
 
 	// The shipped-events log — the redacted, filtered copy of the engine's
 	// own log records that the cloud sink was handed, which is what a
@@ -352,6 +405,13 @@ func NewRouter(d Deps) http.Handler {
 	// to see it: cryden keeps no history of what it logged, so this table
 	// is the history.
 	mux.HandleFunc("GET /v1/admin/logging/recent", adminOnly(logging.Recent))
+	mux.HandleFunc("GET /v1/admin/settings/logging", adminOnly(loggingSettings.Read))
+	mux.HandleFunc("PUT /v1/admin/settings/logging", adminOnly(loggingSettings.Save))
+	mux.HandleFunc("POST /v1/admin/ai/query", adminOnly(adminAI.Query))
+	mux.HandleFunc("POST /v1/admin/ai/logs", adminOnly(adminAI.Logs))
+	mux.HandleFunc("POST /v1/admin/ai/anomalies-scan", adminOnly(adminAI.AnomaliesScan))
+	mux.HandleFunc("POST /v1/admin/ai/audit", adminOnly(adminAI.AuditQuery))
+	mux.HandleFunc("POST /v1/admin/ai/ask", adminOnly(adminAI.Ask))
 
 	// The weekly digest, and the history of the ones the schedule built.
 	//
@@ -363,6 +423,8 @@ func NewRouter(d Deps) http.Handler {
 	// row there. Both are read-only; see DigestHandlers.
 	mux.HandleFunc("GET /v1/admin/digest", adminOnly(digests.Digest))
 	mux.HandleFunc("GET /v1/admin/digest/history", adminOnly(digests.DigestHistory))
+	mux.HandleFunc("GET /v1/admin/settings/digest", adminOnly(digestSettings.Read))
+	mux.HandleFunc("PUT /v1/admin/settings/digest", adminOnly(digestSettings.Save))
 
 	// The support-ticket assistant: "why can't this person log in",
 	// answered from the account's own recorded history. Read-only by
@@ -410,12 +472,34 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("GET /v1/admin/settings/llm-provider", adminOnly(aiSettings.LLMProvider))
 	mux.HandleFunc("PUT /v1/admin/settings/llm-provider", adminOnly(aiSettings.PutLLMProvider))
 	mux.HandleFunc("DELETE /v1/admin/settings/llm-provider", adminOnly(aiSettings.DeleteLLMProvider))
+	mux.HandleFunc("POST /v1/admin/settings/llm-provider/test", adminOnly(aiSettings.TestLLMProvider))
+	mux.HandleFunc("POST /v1/admin/settings/llm-provider/models", adminOnly(aiSettings.LLMModels))
+	mux.HandleFunc("GET /v1/admin/settings/llm-provider/usage", adminOnly(aiSettings.LLMUsage))
 	mux.HandleFunc("GET /v1/admin/settings/database-provider", adminOnly(aiSettings.DatabaseProvider))
 	mux.HandleFunc("PUT /v1/admin/settings/database-provider", adminOnly(aiSettings.PutDatabaseProvider))
 	mux.HandleFunc("DELETE /v1/admin/settings/database-provider", adminOnly(aiSettings.DeleteDatabaseProvider))
 	mux.HandleFunc("GET /v1/admin/settings/ask-ai-widget", adminOnly(aiSettings.AskAIWidget))
 	mux.HandleFunc("PUT /v1/admin/settings/ask-ai-widget", adminOnly(aiSettings.PutAskAIWidget))
 	mux.HandleFunc("DELETE /v1/admin/settings/ask-ai-widget", adminOnly(aiSettings.DeleteAskAIWidget))
+	mux.HandleFunc("GET /v1/admin/settings/password-policy", adminOnly(passwordPolicy.Get))
+	mux.HandleFunc("PUT /v1/admin/settings/password-policy", adminOnly(passwordPolicy.Put))
+
+	// Email. The stats report counts the engine's own email-shaped audit
+	// events (magic-link requests, email changes requested and confirmed),
+	// all-time and over a window, the same audit-event reading the
+	// security reports make. There is no delivery health here on purpose:
+	// the senders are this repo's console stand-ins writing to a log, and
+	// a log line is not a delivery record, so the report counts requests
+	// and its field names say so.
+	//
+	// The template status is read-only in the same way its subject is:
+	// templates are files on disk loaded at boot, so the endpoint reports
+	// which are configured and renders a sample of each, and offers no
+	// save or reset, because there is nothing on this side to save into.
+	// The settings block is where the console's Email screen looks for
+	// it, beside the LLM and database settings it already reads.
+	mux.HandleFunc("GET /v1/admin/email/stats", adminOnly(email.Stats))
+	mux.HandleFunc("GET /v1/admin/settings/email-templates", adminOnly(emailTemplates.EmailTemplates))
 
 	return mux
 }

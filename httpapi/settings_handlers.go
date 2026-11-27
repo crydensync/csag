@@ -1,9 +1,13 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
+
+	crydenai "github.com/crydensync/cryden/v2/ai"
 
 	"github.com/crydensync/csag/aiprovider"
 	"github.com/crydensync/csag/settings"
@@ -46,10 +50,32 @@ type SettingsHandlers struct {
 // differ — and so a future field on the stored config is not silently
 // accepted from a request that predates it.
 type llmProviderDTO struct {
-	Kind      string `json:"kind"`
-	Model     string `json:"model"`
-	APIKey    string `json:"api_key"`
-	MaxTokens int    `json:"max_tokens"`
+	Kind        string   `json:"kind"`
+	Model       string   `json:"model"`
+	APIKey      string   `json:"api_key"`
+	BaseURL     string   `json:"base_url"`
+	MaxTokens   int      `json:"max_tokens"`
+	Temperature *float64 `json:"temperature"`
+	RPM         int      `json:"rpm"`
+}
+
+func (dto llmProviderDTO) config() settings.LLMProviderConfig {
+	maxTokens := dto.MaxTokens
+	if maxTokens == 0 {
+		maxTokens = settings.DefaultLLMMaxTokens
+	}
+	temperature := settings.DefaultLLMTemperature
+	if dto.Temperature != nil {
+		temperature = *dto.Temperature
+	}
+	rpm := dto.RPM
+	if rpm == 0 {
+		rpm = settings.DefaultLLMRPM
+	}
+	return settings.LLMProviderConfig{
+		Kind: dto.Kind, Model: dto.Model, APIKey: dto.APIKey, BaseURL: dto.BaseURL,
+		MaxTokens: maxTokens, Temperature: temperature, RPM: rpm,
+	}
 }
 
 // LLMProvider returns the stored provider with its credential removed.
@@ -107,20 +133,7 @@ func (h *SettingsHandlers) PutLLMProvider(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// An omitted max_tokens is the common case — a console that does not
-	// ask, or asks with the field left empty — so it defaults here rather
-	// than being a validation failure. Any other value is passed through
-	// to Validate, which is the one place the bounds live.
-	if dto.MaxTokens == 0 {
-		dto.MaxTokens = settings.DefaultLLMMaxTokens
-	}
-
-	config := settings.LLMProviderConfig{
-		Kind:      dto.Kind,
-		Model:     dto.Model,
-		APIKey:    dto.APIKey,
-		MaxTokens: dto.MaxTokens,
-	}
+	config := dto.config()
 	if err := config.Validate(); err != nil {
 		// The engine's message names the offending field and bound, which
 		// is what the operator needs to fix the form. Unlike an
@@ -141,6 +154,81 @@ func (h *SettingsHandlers) PutLLMProvider(w http.ResponseWriter, r *http.Request
 	}
 
 	writeData(w, http.StatusOK, config.Redacted())
+}
+
+// TestLLMProvider calls the configured model with a short, fixed diagnostic
+// question. It never stores or returns the supplied credential.
+func (h *SettingsHandlers) TestLLMProvider(w http.ResponseWriter, r *http.Request) {
+	var dto llmProviderDTO
+	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
+		writeBadRequest(w, "malformed request body")
+		return
+	}
+	config := dto.config()
+	if err := config.Validate(); err != nil {
+		writeErr(w, err)
+		return
+	}
+	provider, err := aiprovider.NewLLM(config)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	intent, err := provider.ParseQueryIntent(ctx, "Count users")
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if _, ok := crydenai.AllowedEntities[intent.Entity]; !ok {
+		writeBadRequest(w, "the provider answered, but did not return a supported query intent")
+		return
+	}
+	writeData(w, http.StatusOK, map[string]any{"status": "ok", "kind": config.Kind, "model": config.Model})
+}
+
+type llmModelsDTO struct {
+	APIKey  string `json:"api_key"`
+	BaseURL string `json:"base_url"`
+}
+
+// LLMModels lists the model ids exposed by an OpenAI-compatible endpoint.
+func (h *SettingsHandlers) LLMModels(w http.ResponseWriter, r *http.Request) {
+	var dto llmModelsDTO
+	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
+		writeBadRequest(w, "malformed request body")
+		return
+	}
+	if err := (settings.LLMProviderConfig{
+		Kind: settings.LLMProviderKindOpenAICompatible, Model: "model-list", APIKey: dto.APIKey,
+		BaseURL: dto.BaseURL, MaxTokens: settings.DefaultLLMMaxTokens, Temperature: 0,
+		RPM: settings.DefaultLLMRPM,
+	}).Validate(); err != nil {
+		writeErr(w, err)
+		return
+	}
+	provider, err := aiprovider.NewChatCompletions(aiprovider.ChatConfig{
+		APIKey: dto.APIKey, BaseURL: dto.BaseURL,
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	models, err := provider.ListModels(ctx)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeData(w, http.StatusOK, map[string]any{"models": models})
+}
+
+// LLMUsage returns only aggregate counters maintained for the lifetime of
+// this API process. It never contains prompts, responses, or credentials.
+func (h *SettingsHandlers) LLMUsage(w http.ResponseWriter, _ *http.Request) {
+	writeData(w, http.StatusOK, map[string]any{"providers": aiprovider.UsageSnapshot(), "scope": "since_process_start"})
 }
 
 // DeleteLLMProvider clears the stored provider, which switches the

@@ -16,15 +16,17 @@ import (
 type Config struct {
 	// DatabaseURL and SQLitePath select the backend and are mutually
 	// exclusive — Load refuses both or neither. See UsesSQLite.
-	DatabaseURL         string
-	SQLitePath          string
-	SkipAutoMigrate     bool
-	JWTSecret           string
-	Port                string
-	CORSOrigins         []string
-	AccessTokenTTL      time.Duration
-	EdgeRateLimit       int
-	EdgeRateLimitWindow time.Duration
+	DatabaseURL          string
+	SQLitePath           string
+	SkipAutoMigrate      bool
+	JWTSecret            string
+	Port                 string
+	CORSOrigins          []string
+	AccessTokenTTL       time.Duration
+	EdgeRateLimit        int
+	EdgeRateLimitWindow  time.Duration
+	AskAIRateLimit       int
+	AskAIRateLimitWindow time.Duration
 
 	// BaseURL is this csag deployment's own public URL, used to build
 	// OAuth callback URLs (e.g. BaseURL + "/v1/oauth/google/callback")
@@ -169,6 +171,10 @@ type Config struct {
 	// Argon2id on, and quietly leaving them on the weaker algorithm is
 	// the one failure mode this setting must not have.
 	PasswordHasher string
+
+	// PasswordPolicy is the host-configured initial policy. A persisted
+	// admin setting overrides it after the first console save.
+	PasswordPolicy security.PasswordPolicy
 
 	// Argon2idParams is the cost configuration for that hasher. Like the
 	// anomaly thresholds above, it starts as cryden's own
@@ -367,6 +373,18 @@ func Load() (Config, error) {
 		cfg.EdgeRateLimit = n
 	}
 
+	// The widget makes a paid model call for each accepted question. Keep a
+	// verified-user limit in addition to the coarse per-IP edge guard.
+	cfg.AskAIRateLimit = 10
+	cfg.AskAIRateLimitWindow = time.Minute
+	if v := os.Getenv("ASK_AI_RATE_LIMIT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return cfg, fmt.Errorf("ASK_AI_RATE_LIMIT must be a positive number")
+		}
+		cfg.AskAIRateLimit = n
+	}
+
 	// OAuth is deliberately optional at config-load time — a
 	// deployment that hasn't set these up yet should still run fine
 	// for password-based auth. httpapi.NewRouter only registers the
@@ -513,6 +531,36 @@ func Load() (Config, error) {
 	default:
 		return cfg, fmt.Errorf("PASSWORD_HASHER must be %q or %q, got %q",
 			PasswordHasherBcrypt, PasswordHasherArgon2id, cfg.PasswordHasher)
+	}
+
+	// Password policy is initialized from the host environment and can
+	// later be changed through the admin settings endpoint. The runtime
+	// endpoint only permits policies at least as strong as cryden's
+	// immutable baseline (8..72 bytes).
+	cfg.PasswordPolicy = security.DefaultPasswordPolicy
+	if cfg.PasswordPolicy.MinLength, err = envInt("PASSWORD_POLICY_MIN_LENGTH", cfg.PasswordPolicy.MinLength); err != nil {
+		return cfg, err
+	}
+	if cfg.PasswordPolicy.MaxLength, err = envInt("PASSWORD_POLICY_MAX_LENGTH", cfg.PasswordPolicy.MaxLength); err != nil {
+		return cfg, err
+	}
+	if cfg.PasswordPolicy.RequireUppercase, err = envBool("PASSWORD_POLICY_REQUIRE_UPPERCASE", false); err != nil {
+		return cfg, err
+	}
+	if cfg.PasswordPolicy.RequireLowercase, err = envBool("PASSWORD_POLICY_REQUIRE_LOWERCASE", false); err != nil {
+		return cfg, err
+	}
+	if cfg.PasswordPolicy.RequireDigit, err = envBool("PASSWORD_POLICY_REQUIRE_DIGIT", false); err != nil {
+		return cfg, err
+	}
+	if cfg.PasswordPolicy.RequireSymbol, err = envBool("PASSWORD_POLICY_REQUIRE_SYMBOL", false); err != nil {
+		return cfg, err
+	}
+	if cfg.PasswordPolicy.MinLength < security.DefaultPasswordPolicy.MinLength || cfg.PasswordPolicy.MinLength > security.DefaultPasswordPolicy.MaxLength {
+		return cfg, fmt.Errorf("PASSWORD_POLICY_MIN_LENGTH must be between %d and %d", security.DefaultPasswordPolicy.MinLength, security.DefaultPasswordPolicy.MaxLength)
+	}
+	if cfg.PasswordPolicy.MaxLength < cfg.PasswordPolicy.MinLength || cfg.PasswordPolicy.MaxLength > security.DefaultPasswordPolicy.MaxLength {
+		return cfg, fmt.Errorf("PASSWORD_POLICY_MAX_LENGTH must be between PASSWORD_POLICY_MIN_LENGTH and %d", security.DefaultPasswordPolicy.MaxLength)
 	}
 
 	// Defaults first, then one override per env var — see the field

@@ -8,7 +8,7 @@
 // Usage:
 //
 //	go run ./cmd/grant-operator -db "$DATABASE_URL" -email someone@example.com
-//	go run ./cmd/grant-operator -db "$DATABASE_URL" -email someone@example.com -role superadmin
+//	go run ./cmd/grant-operator -db "$DATABASE_URL" -email someone@example.com -role owner
 //	go run ./cmd/grant-operator -db "$DATABASE_URL" -email someone@example.com -revoke
 package main
 

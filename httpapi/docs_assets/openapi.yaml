@@ -77,6 +77,18 @@ components:
             region: { type: string }
             country: { type: string }
 
+    OAuthProviderSummary:
+      type: object
+      description: One provider's row in GET /admin/oauth/providers. Configuration only; nothing probed.
+      properties:
+        provider: { type: string, description: 'google, github, microsoft, discord, gitlab or apple' }
+        configured:
+          type: boolean
+          description: >
+            Whether this deployment has credentials for the provider. False
+            means it cannot log anyone in. The probe answer for a
+            configured provider is POST /admin/oauth/{provider}/test.
+
     OAuthProviderHealth:
       type: object
       description: One provider's row in GET /admin/oauth/health.
@@ -264,6 +276,105 @@ components:
               codes are not a factor here: they are a fallback for an
               account that already has one.
 
+    PasswordPolicy:
+      type: object
+      required:
+        - min_length
+        - max_length
+        - require_uppercase
+        - require_lowercase
+        - require_digit
+        - require_symbol
+      properties:
+        min_length: { type: integer, minimum: 8, maximum: 72 }
+        max_length: { type: integer, minimum: 8, maximum: 72 }
+        require_uppercase: { type: boolean }
+        require_lowercase: { type: boolean }
+        require_digit: { type: boolean }
+        require_symbol: { type: boolean }
+
+    EmailStats:
+      type: object
+      description: >
+        Email-shaped activity as the engine's own audit events, all-time
+        and over a window. Read-only.
+
+        Every field counts events, and the names say requests rather than
+        deliveries because that is what they are: cryden sends nothing
+        itself and this repo's senders are log-writing stand-ins, so
+        there is no delivery record anywhere to count. A magic-link
+        request for an address with no account records no event (the
+        engine stays silent there to avoid email enumeration), so this
+        report cannot see enumeration probes; it sees what the engine
+        saw, no more.
+      properties:
+        window_days: { type: integer, description: 1-365, default 7. }
+        magic_links_requested:
+          type: integer
+          description: >
+            All-time EventMagicLinkRequested count: requests for
+            accounts that exist.
+        magic_links_requested_in_window: { type: integer }
+        email_changes_requested:
+          type: integer
+          description: >
+            All-time EventEmailChangeRequested count. The confirmation
+            message goes to the NEW address; the change only lands when
+            its token is confirmed.
+        email_changes_requested_in_window: { type: integer }
+        email_changes_confirmed:
+          type: integer
+          description: >
+            All-time EventEmailChanged count. Requested minus confirmed
+            is the pair worth reading: requests that never confirm are
+            abandoned or mistyped addresses, and the windowed pair says
+            whether that is happening now.
+        email_changes_confirmed_in_window: { type: integer }
+
+    EmailTemplates:
+      type: object
+      description: >
+        The state of the two disk templates this repo's senders read at
+        boot. Read-only: templates are files, so there is nothing here to
+        save into or reset from.
+      properties:
+        configured:
+          type: boolean
+          description: >
+            True when EMAIL_TEMPLATE_DIR was set and loaded. False means
+            the senders print their own built-in lines and there is no
+            rendered sample to report.
+        email_template_dir:
+          type: string
+          description: The configured directory, empty when unconfigured.
+        kinds:
+          type: array
+          description: One entry per template this repo knows, in a stable order.
+          items:
+            type: object
+            properties:
+              kind: { type: string, enum: [verification, magic_link] }
+              filename: { type: string, description: verification.txt or magic_link.txt }
+              configured:
+                type: boolean
+                description: >
+                  False when EMAIL_TEMPLATE_DIR was not set or the
+                  directory held no template for this kind; the two fall
+                  back independently, so one can be configured without
+                  the other.
+              sample:
+                type: string
+                description: >
+                  A rendering with placeholder values (To
+                  status@example.com, Token SAMPLE_TOKEN, URL the
+                  magic-link example). Empty when not configured.
+              sample_error:
+                type: string
+                description: >
+                  Set only when a configured template fails to render;
+                  surfaced rather than hidden, because a template that
+                  cannot render is one that will fail at send time.
+
     AdminUser:
       type: object
       description: >
@@ -347,6 +458,8 @@ components:
       properties:
         id: { type: string, format: uuid }
         type: { type: string }
+        user_id: { type: string, format: uuid }
+        email: { type: string, format: email }
         ip: { type: string }
         metadata:
           type: object
@@ -448,6 +561,8 @@ components:
             than dropping the event, which is exactly why the primary
             key is `id` and not this.
         event_type: { type: string, description: The audit event that fired, e.g. account_locked. }
+        destination_id: { type: string, description: Stable runtime endpoint ID captured when queued. }
+        destination_name: { type: string, description: Endpoint label captured when queued, retained after endpoint removal. }
         user_id:
           type: string
           format: uuid
@@ -598,9 +713,11 @@ components:
       properties:
         kind:
           type: string
+          enum: [anthropic, openai-compatible]
           description: >
-            Which provider implementation to build. One value today:
-            "anthropic".
+            Anthropic Messages API or the common OpenAI-compatible chat
+            completions protocol. Compatible hosts are selected by base_url,
+            so adding a vendor using that protocol needs no vendor adapter.
         model:
           type: string
           description: >
@@ -614,13 +731,27 @@ components:
             The provider credential. Required on every write see PUT
             on this path for why "blank keeps the existing one" is
             refused. Sealed before storage and never returned.
+        base_url:
+          type: string
+          format: uri
+          description: Required for openai-compatible; optional for an Anthropic-compatible endpoint.
         max_tokens:
           type: integer
           minimum: 256
           maximum: 8192
-          description: >
-            Ceiling on a single model response. Defaults when omitted
-            (0), rather than failing validation.
+          default: 2048
+          description: Ceiling on a single model response.
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+          default: 0.2
+        rpm:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          default: 60
+          description: Per-provider requests per minute.
 
     RedactedLLMProvider:
       type: object
@@ -636,9 +767,14 @@ components:
         model:
           type: string
           description: The stored model id, or empty when none is stored.
+        base_url:
+          type: string
+          description: Configured endpoint URL, if applicable.
         max_tokens:
           type: integer
           description: The stored ceiling, or 0 when none is stored.
+        temperature: { type: number }
+        rpm: { type: integer }
         api_key_set:
           type: boolean
           description: Whether a credential is stored. Says nothing about whether it still works.
@@ -1297,6 +1433,13 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '429':
+          description: >
+            rate_limited — this verified user has reached the configured
+            Ask-AI question limit for the current one-minute window.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
         '404':
           description: >
             ask_ai_widget_disabled an operator has switched the widget
@@ -1403,6 +1546,87 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
 
+  /admin/operators:
+    get:
+      summary: Current console operator roster
+      description: Admin only. Returns the live roles in the API's operator store. Operator management writes are not exposed by this API version.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Current operators and total count
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [operators, total]
+                    properties:
+                      operators:
+                        type: array
+                        items:
+                          type: object
+                          required: [user_id, email, role, created_at]
+                          properties:
+                            user_id: { type: string, format: uuid }
+                            email: { type: string, format: email }
+                            role: { type: string, enum: [owner, admin, viewer] }
+                            created_at: { type: string, format: date-time }
+                      total: { type: integer, minimum: 0 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/sessions:
+    get:
+      summary: Active sessions across all accounts
+      description: Admin only. Returns paginated active sessions with account email and a device label. The response omits refresh-token hashes and session-family identifiers.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 10000, default: 0 }
+      responses:
+        '200': { description: Active session page }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+  /admin/sessions/{sessionID}:
+    delete:
+      summary: Revoke one active session
+      description: Admin only. The action is recorded in the audit log.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Session revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: The session does not exist or is no longer active.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+  /admin/sessions/revoke-all:
+    post:
+      summary: Revoke every active session
+      description: Admin only. Signs every account out, including the operator making this request. The action is recorded in the audit log.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Number of sessions revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
   /admin/oauth/health:
     get:
       summary: Reachability of each OAuth provider this API knows about
@@ -1431,6 +1655,72 @@ paths:
                         items: { $ref: '#/components/schemas/OAuthProviderHealth' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/oauth/providers:
+    get:
+      summary: Which OAuth providers this deployment has credentials for
+      description: >
+        Admin only — an operator's token. One row per provider this API can
+        speak to: its name and whether it is configured. Answers from
+        configuration alone; no probe runs and no request leaves the
+        process, which is why it exists beside /admin/oauth/health — a
+        screen renders the list on open and probes only when the operator
+        asks. Read-only by design: credentials arrive by environment, so
+        there is nothing here to create or edit.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: One row per provider, in a stable order, none probed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      providers:
+                        type: array
+                        items: { $ref: '#/components/schemas/OAuthProviderSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/oauth/{provider}/test:
+    post:
+      summary: Probe one configured provider's authorize endpoint, on demand
+      description: >
+        Admin only — an operator's token. The same probe the health report
+        runs (same client, same 5 s timeout, same 4xx-is-ok reading),
+        against the one provider named in the path, so testing one costs
+        one outbound request rather than six. An unconfigured provider
+        answers 404 oauth_provider_not_configured and nothing is probed:
+        "never configured" and "down" are different sentences, and probing
+        an unconfigured name is the one request this endpoint would make
+        for a provider the deployment never opted into.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema: { type: string, description: 'google, github, microsoft, discord, gitlab or apple' }
+      responses:
+        '200':
+          description: The probe's verdict for that one provider
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/OAuthProviderHealth' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: oauth_provider_not_configured — no credentials for that provider, so nothing was probed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
         '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
 
   /admin/users:
@@ -1915,6 +2205,50 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
 
+  /admin/audit:
+    get:
+      summary: Paginated audit events
+      description: Admin only. Filters engine and admin events by event type, user UUID and inclusive RFC3339 time bounds. Uses a descending created_at and id cursor so new events do not shift later pages.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: event_type
+          in: query
+          schema: { type: string, maxLength: 100 }
+        - name: user_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: since
+          in: query
+          schema: { type: string, format: date-time }
+        - name: until
+          in: query
+          schema: { type: string, format: date-time }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: One page of matching audit events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      events: { type: array, items: { $ref: '#/components/schemas/AuditEvent' } }
+                      limit: { type: integer }
+                      has_more: { type: boolean }
+                      next_cursor: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
   /admin/anomalies:
     get:
       summary: The flagged-event review queue
@@ -2055,7 +2389,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
 
-  /admin/webhooks/deliveries:
+  /admin/webhooks:
     get:
       summary: The webhook delivery log, newest first
       description: >
@@ -2092,6 +2426,224 @@ paths:
             that from a log holding 500 rows.
       responses:
         '200':
+          description: Endpoint settings, empty when not configured
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [url, secret_set]
+                    properties:
+                      url: { type: string }
+                      secret_set: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+    put:
+      summary: Save the runtime webhook endpoint
+      description: Admin only. Stores the signing secret encrypted using SETTINGS_ENCRYPTION_KEY. HTTPS is required except for loopback development URLs. Omitting secret preserves the saved secret.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string, format: uri }
+                secret: { type: string, writeOnly: true }
+      responses:
+        '200': { description: Saved endpoint settings; the secret is never returned }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: >
+            not_configured the router was built without a delivery log,
+            which is what an unset WEBHOOK_URL produces. A wiring fact,
+            not a server fault.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/webhooks/endpoints:
+    get:
+      summary: The shipped-events log, newest first
+      description: >
+        Admin only. Lists records as the cloud-logging sink received
+        them: redacted and level-filtered. This deployment ships no
+        vendor SDK, so "shipped" means recorded in this API's own table,
+        which is the same bytes a hosted aggregator would have been
+        handed swapping in a real client later changes one line of
+        main.go and nothing here.
+
+        Read-only by construction, like the other admin endpoints. There
+        is deliberately no endpoint that writes a record, edits the level
+        threshold, or clears the log: changing what gets shipped is
+        configuration, and configuration changes go through the same
+        explicit, human-confirmed settings path every other one does.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Configured destinations }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Runtime settings are not configured }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+    post:
+      summary: Add a webhook destination
+      description: Admin only. Each active audit event is queued once per destination. The signing secret is encrypted at rest.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, url, secret]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 80 }
+                url: { type: string, format: uri }
+                secret: { type: string, writeOnly: true }
+      responses:
+        '201': { description: Created destination; secret is never returned }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Runtime settings are not configured }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/webhooks/endpoints/{endpointID}:
+    put:
+      summary: Update a webhook destination
+      description: Admin only. Omitting secret preserves the current key. An ID of default manages the legacy default endpoint.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: endpointID
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 80 }
+                url: { type: string, format: uri }
+                secret: { type: string, writeOnly: true }
+      responses:
+        '200': { description: Updated destination, secret is never returned }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Destination does not exist }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+    delete:
+      summary: Remove a webhook destination
+      description: Admin only. Removal is refused while this destination has pending or in-flight deliveries.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: endpointID
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Removed destination }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Destination does not exist }
+        '409': { description: Destination still has queued deliveries }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/webhooks/endpoints/{endpointID}/test:
+    post:
+      summary: Queue a test for one destination
+      description: Admin only. Queues an asynchronous synthetic event addressed to this destination.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: endpointID
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '202': { description: Test delivery queued }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Destination does not exist }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/webhooks/test:
+    post:
+      summary: Queue a test webhook event
+      description: Admin only. Queues a synthetic event for the configured runtime destination. Delivery is asynchronous and appears in the delivery history.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '202':
+          description: Test event queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [queued, event_id, endpoint_url]
+                    properties:
+                      queued: { type: boolean }
+                      event_id: { type: string }
+                      endpoint_url: { type: string, format: uri }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/webhooks/deliveries:
+    get:
+      summary: The webhook delivery log, newest first
+      description: >
+        Admin only. Lists what this API enqueued for delivery and what
+        happened to each row. Deliveries are enqueued, never sent
+        inline: the engine calls the webhook sender synchronously on the
+        login request path, so this API writes a row and returns, and a
+        background worker makes the call. Failures are retried with
+        exponential backoff up to a configured maximum, then recorded as
+        `failed` and left readable — nothing is ever deleted.
+
+        Read-only by construction. There is deliberately no "retry this
+        delivery" endpoint: re-queuing a delivery has consequences for a
+        third party, and this surface reports rather than acts.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: destination_id
+          in: query
+          required: false
+          schema: { type: string }
+          description: Restrict history to one destination ID. Each destination receives an independent queued delivery and retry history.
+        - name: status
+          in: query
+          required: false
+          schema: { type: string, enum: [pending, in_flight, delivered, failed] }
+          description: >
+            Restrict to one status. An unrecognized value is a 400
+            naming the four valid ones, not an empty list — which is
+            indistinguishable from "no deliveries", the one thing a
+            filter must never be confusable with. Absent means every
+            status.
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+          description: >
+            Out of range or non-numeric is a 400, not a silent clamp — a
+            caller asking for 100000 and getting 500 back cannot tell
+            that from a log holding 500 rows.
+      responses:
+        '200':
           description: The matching rows, newest first
           content:
             application/json:
@@ -2118,7 +2670,7 @@ paths:
         '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: >
-            not_configured the router was built without a delivery log,
+            not_configured — the router was built without a delivery log,
             which is what an unset WEBHOOK_URL produces. A wiring fact,
             not a server fault.
           content:
@@ -2133,7 +2685,7 @@ paths:
         them: redacted and level-filtered. This deployment ships no
         vendor SDK, so "shipped" means recorded in this API's own table,
         which is the same bytes a hosted aggregator would have been
-        handed swapping in a real client later changes one line of
+        handed — swapping in a real client later changes one line of
         main.go and nothing here.
 
         Read-only by construction, like the other admin endpoints. There
@@ -2185,8 +2737,6 @@ paths:
                         description: The four valid values, least severe first.
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: >
             not_configured the router was built without a shipped-events
@@ -2194,6 +2744,87 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/email/stats:
+    get:
+      summary: Email-shaped activity as the engine's own audit events
+      description: >
+        Admin only. Counts the audit events each email-shaped flow
+        records: magic-link requests, email changes requested, and email
+        confirmed, all-time and over a window. Read-only by
+        construction; it calls count methods and records nothing.
+
+        It counts REQUESTS, not deliveries. cryden sends nothing itself
+        and this repo's senders are console stand-ins that log, so a log
+        line is not a delivery record, and no field here claims one.
+        magic_links_requested is the closest thing to "magic links sent"
+        this deployment has, and it includes only requests for addresses
+        that hold an account. The engine returns nil for an unknown
+        address to avoid email enumeration and records no event, so a
+        request for an address nobody holds is invisible here by design.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: window_days
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 365, default: 7 }
+          description: >
+            The reporting window. Out of range or non-numeric is a 400,
+            not a silent clamp.
+      responses:
+        '200':
+          description: The report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/EmailStats' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: not_configured, the router was built without the audit store.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/settings/email-templates:
+    get:
+      summary: Which message templates this deployment has configured
+      description: >
+        Admin only. Reports the state of the two disk templates this repo's
+        senders read at boot (verification.txt and magic_link.txt, from
+        EMAIL_TEMPLATE_DIR): configured or built-in, the directory they
+        live in, and a rendered sample of each with placeholder values.
+        A sample_error on a configured kind means the template was found
+        but does not render (a parse error or an unknown field), which is
+        surfaced rather than hidden, because a template that cannot
+        render is one that will fail at send time.
+
+        READ-ONLY BY CONSTRUCTION: templates are files on disk, so there
+        is no save and no reset here; an operator edits them on the host
+        filesystem and restarts, exactly as they would any other
+        file-based configuration. The sample is rendered per request, so
+        it reflects the files as loaded at boot, not as they sit on disk
+        now (a change requires a restart; there is no reload path).
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: >
+            The status of both templates. configured:false (and empty
+            sample fields) is the state of a deployment with no
+            EMAIL_TEMPLATE_DIR, which is unconfigured rather than failing.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/EmailTemplates' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
 
   /admin/config-tuning:
     get:
@@ -2390,10 +3021,9 @@ paths:
         cryden has no scheduling concept: WeeklyDigest/DigestSince build a
         report on demand and return a string, with no run record. The
         table, the job that fills it and this endpoint are all this API's
-        own. DIGEST_INTERVAL_HOURS turns the schedule on; it is opt-in,
-        and the first run happens one full interval after startup rather
-        than at boot, so a process that restarts often does not write one
-        row per restart.
+        own. The admin setting controls a weekly day, local time, timezone,
+        recipients, and whether a host-provided sender delivers the report.
+        The first run is the next configured time, never at process startup.
       security: [{ bearerAuth: [] }]
       parameters:
         - name: limit
@@ -2431,6 +3061,420 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/settings/digest:
+    get:
+      summary: Read the weekly digest schedule and delivery availability
+      description: Admin only. Returns the persisted schedule and whether this API build has a host-provided digest sender. The standalone API does not ship an outbound email provider.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Current digest schedule
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [enabled, day_of_week, time, timezone, recipients, delivery_enabled, delivery_available]
+                    properties:
+                      enabled: { type: boolean }
+                      day_of_week: { type: string, enum: [sunday, monday, tuesday, wednesday, thursday, friday, saturday] }
+                      time: { type: string, pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$' }
+                      timezone: { type: string, description: IANA timezone name }
+                      recipients: { type: array, maxItems: 20, items: { type: string, format: email } }
+                      delivery_enabled: { type: boolean }
+                      delivery_available: { type: boolean, description: Whether this API build has a host-provided email sender }
+                      interval_hours: { type: integer, minimum: 1, maximum: 8760, description: Present only when using the legacy interval environment setting }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+    put:
+      summary: Save the weekly digest schedule and recipients
+      description: Admin only. Changes are persisted and picked up within one minute. Enabling delivery requires a host-provided sender; the standalone API rejects that setting rather than pretending to send.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled, day_of_week, time, timezone, recipients, delivery_enabled]
+              additionalProperties: false
+              properties:
+                enabled: { type: boolean }
+                day_of_week: { type: string, enum: [sunday, monday, tuesday, wednesday, thursday, friday, saturday] }
+                time: { type: string, pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$' }
+                timezone: { type: string, minLength: 1, maxLength: 64 }
+                recipients: { type: array, maxItems: 20, items: { type: string, format: email } }
+                delivery_enabled: { type: boolean }
+                interval_hours: { type: integer, minimum: 0, maximum: 8760, description: Set to zero or omit for weekly scheduling }
+      responses:
+        '200': { description: Saved digest schedule }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Digest delivery is enabled but no host sender is configured
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/settings/password-policy:
+    get:
+      summary: The active password policy
+      description: >
+        Admin only. Returns the policy the API currently enforces for signup,
+        password changes and admin-created accounts. Runtime updates are
+        persisted and read by every API instance. The policy cannot weaken the
+        CSAX Auth baseline: minimum length is 8-72 bytes and maximum length is
+        between the minimum and 72 bytes. Composition requirements can be
+        enabled independently. SQLite deployments do not expose admin routes.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: The active policy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/PasswordPolicy' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+    put:
+      summary: Replace the active password policy
+      description: >
+        Admin only. All fields are required. Saves immediately and persists
+        across restarts and API instances. The change is recorded as an audit
+        event. Minimum length must be 8-72; maximum length must be at least
+        the minimum and no greater than 72, because the engine's immutable
+        baseline cannot be weakened. Password writes rejected by the active
+        policy include every stable violation code in error.details.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PasswordPolicy' }
+      responses:
+        '200':
+          description: The saved policy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/PasswordPolicy' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/ai/query:
+    post:
+      summary: Run an admin-only read-only AI query
+      description: Admin only. The model produces a typed query intent, not SQL. CSAG validates its entity, fields, operators and limit against cryden's allowlist, then runs it using the configured read-only database connection.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [question]
+              properties:
+                question: { type: string, minLength: 1, maxLength: 500 }
+      responses:
+        '200':
+          description: Query result with source entity citation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [entity, columns, rows, row_count]
+                    properties:
+                      entity: { type: string, enum: [users, sessions, audit_events] }
+                      columns: { type: array, items: { type: string } }
+                      rows: { type: array, items: { type: array, items: { type: string } } }
+                      row_count: { type: integer, minimum: 0, maximum: 500 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: LLM or read-only database provider is not configured }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/ai/logs:
+    post:
+      summary: Summarize recent shipped logs with AI
+      description: Admin only. Reads at most 50 redacted archived log entries and asks the configured provider to summarize them. The citation is attached by CSAG.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false }
+      responses:
+        '200':
+          description: Summary and code-generated source citation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [answer, source_entity, row_count]
+                    properties:
+                      answer: { type: string }
+                      source_entity: { type: string, enum: [shipped_logs] }
+                      row_count: { type: integer, minimum: 0, maximum: 50 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: AI providers or shipped log archive are not configured }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/ai/anomalies-scan:
+    post:
+      summary: Summarize recent flagged authentication events with AI
+      description: Admin only. Reads at most 50 flagged events from the selected bounded time window.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [since]
+              properties:
+                since: { type: string, enum: [1h, 24h, 7d, 30d] }
+      responses:
+        '200':
+          description: Summary and code-generated source citation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [answer, source_entity, row_count, since]
+                    properties:
+                      answer: { type: string }
+                      source_entity: { type: string, enum: [anomalies] }
+                      row_count: { type: integer, minimum: 0, maximum: 50 }
+                      since: { type: string, enum: [1h, 24h, 7d, 30d] }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: AI providers are not configured }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/ai/audit:
+    post:
+      summary: Query audit events with AI
+      description: Admin only. The generated intent must target audit_events and is then validated against cryden's read-only allowlist.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [question]
+              properties:
+                question: { type: string, minLength: 1, maxLength: 500 }
+      responses:
+        '200':
+          description: Structured audit query result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [entity, columns, rows, row_count]
+                    properties:
+                      entity: { type: string, enum: [audit_events] }
+                      columns: { type: array, items: { type: string } }
+                      rows: { type: array, items: { type: array, items: { type: string } } }
+                      row_count: { type: integer, minimum: 0, maximum: 500 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: AI providers are not configured }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/ai/ask:
+    post:
+      summary: Ask a question over admin data with AI
+      description: Admin only. Runs the allowlisted read-only query pipeline, then composes a plain-language answer from its bounded result. Citation fields are generated by CSAG.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [question]
+              properties:
+                question: { type: string, minLength: 1, maxLength: 500 }
+      responses:
+        '200':
+          description: Composed answer and code-generated source citation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [answer, source_entity, row_count]
+                    properties:
+                      answer: { type: string }
+                      source_entity: { type: string, enum: [users, sessions, audit_events] }
+                      row_count: { type: integer, minimum: 0, maximum: 500 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: AI providers are not configured }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/settings/logging:
+    get:
+      summary: Read runtime shipped-log settings
+      description: Admin only. Returns archive enablement, minimum level, deployment redaction mode, and whether a hash key is configured. Secrets are never returned.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Current runtime and deployment logging settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [enabled, min_level, redaction, hash_key_set]
+                    properties:
+                      enabled: { type: boolean }
+                      min_level: { type: string, enum: [debug, info, warn, error] }
+                      redaction: { type: string, enum: [mask, hash] }
+                      hash_key_set: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+    put:
+      summary: Update runtime shipped-log settings
+      description: Admin only. Enables or pauses the redacted local archive and sets its minimum severity. Changes take effect immediately. Redaction mode and keys remain deployment configuration.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled, min_level]
+              properties:
+                enabled: { type: boolean }
+                min_level: { type: string, enum: [debug, info, warn, error] }
+      responses:
+        '200': { description: Saved active settings and redacted deployment details }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/settings/jwt-claims:
+    get:
+      summary: Read global JWT source mappings
+      description: Admin only. Returns mappings and claim names CSAG reserves. The non-secret mapping config is stored in the Postgres settings table.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Current mappings, empty when none are configured
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [mappings, reserved_claim_names]
+                    properties:
+                      mappings:
+                        type: array
+                        items:
+                          type: object
+                          required: [claim, source]
+                          properties:
+                            claim: { type: string }
+                            source: { type: string }
+                      reserved_claim_names: { type: array, items: { type: string } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Postgres settings are not configured }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+    put:
+      summary: Replace global JWT source mappings
+      description: Admin only. New mappings apply when CSAG next issues or refreshes an access token. Reserved claim names and unsupported sources are rejected.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mappings]
+              properties:
+                mappings:
+                  type: array
+                  maxItems: 32
+                  items:
+                    type: object
+                    required: [claim, source]
+                    properties:
+                      claim: { type: string }
+                      source:
+                        type: string
+                        enum: [user.id, user.email, user.created_at, user.updated_at]
+                        description: A supported source; per-user metadata can be referenced as metadata.KEY.
+      responses:
+        '200': { description: Saved mapping configuration }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Postgres settings are not configured }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/settings/jwt-claims/preview:
+    post:
+      summary: Preview additional claims for a user
+      description: Admin only. Evaluates the configured claims provider for the selected user. The response is not a signed access token.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id]
+              properties:
+                user_id: { type: string, format: uuid }
+      responses:
+        '200': { description: Current email and additional claims computed for this user }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: User does not exist or claim settings are not configured }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
 
   /admin/settings/llm-provider:
     get:
@@ -2566,6 +3610,51 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/settings/llm-provider/test:
+    post:
+      summary: Test an LLM provider configuration
+      description: Admin only. Makes one bounded provider call and returns status without storing or returning the credential.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LLMProviderInput' }
+      responses:
+        '200': { description: Provider responded with a supported query intent }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /admin/settings/llm-provider/models:
+    post:
+      summary: List models from an OpenAI-compatible endpoint
+      description: Admin only. The API key is used server-side and never returned.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [api_key, base_url]
+              properties:
+                api_key: { type: string }
+                base_url: { type: string, format: uri }
+      responses:
+        '200': { description: Available model identifiers }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /admin/settings/llm-provider/usage:
+    get:
+      summary: Read aggregate LLM usage counters
+      description: Admin only. Counters cover the lifetime of this API process and reset on restart.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Provider request, success, failure, rate limit, latency and timestamp counters }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /admin/settings/database-provider:
     get:

@@ -28,6 +28,7 @@ var tieredEnvVars = []string{
 	"REDIS_URL",
 	"RATE_LIMIT_ATTEMPTS",
 	"RATE_LIMIT_WINDOW_SECONDS",
+	"ASK_AI_RATE_LIMIT",
 	"PASSWORD_HASHER",
 	"ARGON2ID_MEMORY_KIB",
 	"ARGON2ID_ITERATIONS",
@@ -98,6 +99,9 @@ func TestTier2DefaultsComeFromTheEngine(t *testing.T) {
 	if cfg.RateLimitAttempts != 10 || cfg.RateLimitWindow != time.Minute {
 		t.Errorf("rate limit = %d per %s, want 10 per minute", cfg.RateLimitAttempts, cfg.RateLimitWindow)
 	}
+	if cfg.AskAIRateLimit != 10 || cfg.AskAIRateLimitWindow != time.Minute {
+		t.Errorf("Ask-AI rate limit = %d per %s, want 10 per minute", cfg.AskAIRateLimit, cfg.AskAIRateLimitWindow)
+	}
 }
 
 func TestTier2EnvOverridesLeaveOtherKnobsDefaulted(t *testing.T) {
@@ -111,6 +115,7 @@ func TestTier2EnvOverridesLeaveOtherKnobsDefaulted(t *testing.T) {
 		"REDIS_URL":                           "redis://localhost:6379/0",
 		"RATE_LIMIT_ATTEMPTS":                 "25",
 		"RATE_LIMIT_WINDOW_SECONDS":           "30",
+		"ASK_AI_RATE_LIMIT":                   "7",
 	})
 	if err != nil {
 		t.Fatalf("Load() failed: %v", err)
@@ -151,6 +156,19 @@ func TestTier2EnvOverridesLeaveOtherKnobsDefaulted(t *testing.T) {
 	}
 	if cfg.RateLimitAttempts != 25 || cfg.RateLimitWindow != 30*time.Second {
 		t.Errorf("rate limit = %d per %s, want 25 per 30s", cfg.RateLimitAttempts, cfg.RateLimitWindow)
+	}
+	if cfg.AskAIRateLimit != 7 || cfg.AskAIRateLimitWindow != time.Minute {
+		t.Errorf("Ask-AI rate limit = %d per %s, want 7 per minute", cfg.AskAIRateLimit, cfg.AskAIRateLimitWindow)
+	}
+}
+
+func TestAskAIRateLimitMustBePositive(t *testing.T) {
+	for _, value := range []string{"0", "-1", "not-a-number"} {
+		t.Run(value, func(t *testing.T) {
+			if _, err := loadForTest(t, map[string]string{"ASK_AI_RATE_LIMIT": value}); err == nil {
+				t.Fatalf("Load() with ASK_AI_RATE_LIMIT=%q succeeded, want an error", value)
+			}
+		})
 	}
 }
 
