@@ -9,8 +9,8 @@ import (
 
 	crydenai "github.com/crydensync/cryden/v2/ai"
 
-	"github.com/crydensync/api/aiprovider"
-	"github.com/crydensync/api/settings"
+	"github.com/crydensync/csag/aiprovider"
+	"github.com/crydensync/csag/settings"
 )
 
 // The errors these handlers add to the map. Declared here rather than in

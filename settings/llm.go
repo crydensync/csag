@@ -59,8 +59,9 @@ type LLMProviderConfig struct {
 // place the rule can be enforced — a handler that trusted a form would be
 // enforcing it in the wrong layer.
 func (c LLMProviderConfig) Validate() error {
-	if c.Kind != LLMProviderKindAnthropic && c.Kind != LLMProviderKindOpenAICompatible {
-		return fmt.Errorf("%w: kind must be anthropic or openai-compatible", ErrInvalidLLMProvider)
+	if c.Kind != LLMProviderKindAnthropic {
+		return fmt.Errorf("%w: unknown provider kind %q, this csag can only build %q",
+			ErrInvalidLLMProvider, c.Kind, LLMProviderKindAnthropic)
 	}
 	if strings.TrimSpace(c.Model) == "" || strings.TrimSpace(c.APIKey) == "" {
 		return fmt.Errorf("%w: model and api_key are required", ErrInvalidLLMProvider)

@@ -11,9 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/crydensync/api/settings"
-	"github.com/crydensync/api/webhook"
-	"github.com/crydensync/cryden/v2/store"
+	"github.com/crydensync/csag/webhook"
 )
 
 // WebhookHandlers answers the admin webhook delivery log.

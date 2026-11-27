@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crydensync/api/config"
+	"github.com/crydensync/csag/config"
 )
 
 // adminPaths is one route from each block under /v1/admin, not every route —
